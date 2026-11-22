@@ -290,7 +290,7 @@ def main():
         def run_cell(**ns):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                exec(cell13, {"OUT": "/x", "HF_PRIVATE": True, "HF_LICENSE": "mit", **ns})
+                exec(cell13, {"OUT": "/x", "RUN": "/x/checkpoints/pretrain_cosine", "HF_PRIVATE": True, "HF_LICENSE": "mit", **ns})
             return buf.getvalue()
         out_ = run_cell(PUSH_TO_HUB=False, HF_REPO_ID="u/m")
         ok(called == [] and "Skipping" in out_, "PUSH_TO_HUB = False: nothing is called, a message is printed")

@@ -122,11 +122,17 @@ def main():
     ok("finish_session" in last and "QUIT_WHEN_DONE" in last and "GRACE_SECONDS" in last, "the LAST code cell ends the session")
     ok(cells[-1] is code[-1] or cells[-1]["cell_type"] == "markdown", "the quit cell comes after the evaluation and tests cells")
     order = [src(c) for c in code]
-    real = next(i for i, s in enumerate(order) if "run.py pretrain --cache /content/tokens --out $OUT/checkpoints/pretrain_base" in s)
+    real = next(i for i, s in enumerate(order) if "run.py pretrain --cache /content/tokens --out $RUN" in s)
     evalc = next(i for i, s in enumerate(order) if s.startswith("# 10d"))
     quit_i = next(i for i, s in enumerate(order) if "finish_session" in s)
     ok(real < evalc < quit_i, "order: real run, then evaluation, then end of session")
     ok("--resume" in order[real], "the real-run cell always passes --resume")
+    ok("--steps $STEPS" in order[real] and "--schedule $NOISE_SCHEDULE" in order[real], "the real run takes STEPS and NOISE_SCHEDULE from cell 1")
+    ok(all(f"{n} = " in order[0] for n in ("STEPS", "NOISE_SCHEDULE", "RUN_NAME")) and "STEPS = 25_000" in order[0] and 'NOISE_SCHEDULE = "cosine"' in order[0], "cell 1 has STEPS / NOISE_SCHEDULE / RUN_NAME (25,000 steps, cosine)")
+    ok(not any("pretrain_base" in s_ for s_ in order), "no cell hard-codes the old run folder: everything uses RUN")
+    ok("run=RUN_NAME" in last, "the end-of-session cell checks the same run folder")
+    gen = next(s_ for s_ in order if s_.startswith("# 10b"))
+    ok(gen.count("--schedule $NOISE_SCHEDULE") == 2, "generation uses the training noise schedule")
     ok(any("RUN_SWEEP = False" in s for s in order) and any("if RUN_SWEEP" in s and "--sweep" in s for s in order),
        "the long sweep is opt-in (RUN_SWEEP = False by default)")
     ok(any("QUIT_WHEN_DONE = True" in s for s in order), "session ending is on by default")

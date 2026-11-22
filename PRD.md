@@ -173,7 +173,7 @@ DLM/
   run_colab.ipynb     thin Colab runner (mount Drive, clone, pip install, call run.py)
   dlm/                download.py, cleaning.py, tokenizer.py   (built, Phases 0-1)
                       data.py, model.py, diffusion.py, train.py, sample.py   (built: Phases 0-7 incl. model/diffusion/train/sample/evaluate; train.py --task sft is the only interface skeleton left, Phase 8)
-  tests/              offline tests (2,679 checks); `python run.py test`
+  tests/              offline tests (2,704 checks); `python run.py test`
 ```
 
 The five skeleton modules each state what they own, consume and produce, and the open decisions to grill before building them; until then `python run.py pretrain|sft|generate|phase2` exits 2 and names the phase. Fine-tuning is `train.py` with `--init-from <pre-trained checkpoint> --task sft`: same loop, prompt never masked, loss on the response only.

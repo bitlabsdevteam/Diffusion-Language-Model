@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-LIGHT = ("download", "cleaning", "tokenizer", "data")   # must import without torch
+LIGHT = ("download", "cleaning", "tokenizer", "data", "colab")   # must import without torch
 HEAVY = ("model", "diffusion", "train", "sample")        # may import torch
 # command -> text that must appear in the message (the phase and the thing to grill first)
 UNBUILT = {

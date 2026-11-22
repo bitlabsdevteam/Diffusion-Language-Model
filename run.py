@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 TESTS = ("test_download.py", "test_tokenizer.py", "test_data.py", "test_model.py", "test_diffusion.py", "test_train.py",
-         "test_sample.py", "test_evaluate.py", "test_layout.py")
+         "test_sample.py", "test_evaluate.py", "test_colab.py", "test_layout.py")
 
 
 def run_tests() -> int:

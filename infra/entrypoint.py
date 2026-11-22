@@ -1,6 +1,6 @@
 """Container entrypoint: fetch the model release from S3 (when DLM_MODEL_URI is set), verify it, start the API.
 
-The task role provides the S3 credentials; nothing is stored in the image. `deployment.json` is the release marker
+The EC2 instance role provides the S3 credentials (IMDSv2, hop limit 2); nothing is stored in the image. `deployment.json` is the release marker
 and carries a SHA-256 per file, so a partial or tampered download stops the container instead of serving.
 """
 import hashlib

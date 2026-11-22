@@ -1,7 +1,8 @@
-"""FastAPI wrapper around the DLM sampler (CPU build for AWS Fargate).
+"""FastAPI wrapper around the DLM sampler (GPU build for an AWS EC2 g4dn instance).
 
 Loads the checkpoint once at startup, serves one generation at a time (a second concurrent request gets 503)
 and refuses to start when the release and the container disagree (schedule, code revision, tokenizer ids).
+DLM_DEVICE (default cuda) and DLM_DTYPE (fp32 default; fp16 only after a parity check, a T4 has no bf16).
 """
 import json
 import os
@@ -32,12 +33,14 @@ class GenerateRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     directory = Path(os.environ.get("DLM_MODEL_DIR", "/model"))
-    device = os.environ.get("DLM_DEVICE", "cpu")
+    device = os.environ.get("DLM_DEVICE", "cuda")
     if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("DLM_DEVICE=cuda but CUDA is unavailable")
-    threads = int(os.environ.get("DLM_THREADS", "0"))
-    if threads > 0:  # Fargate reports the host's cores; use the vCPUs this task actually has
-        torch.set_num_threads(threads)
+        raise RuntimeError("DLM_DEVICE=cuda but CUDA is unavailable; check the host driver and --gpus all")
+    dtype = os.environ.get("DLM_DTYPE", "fp32")
+    if dtype not in {"fp32", "fp16"}:
+        raise ValueError("DLM_DTYPE must be fp32 or fp16")
+    if dtype == "fp16" and device != "cuda":
+        raise ValueError("DLM_DTYPE=fp16 needs DLM_DEVICE=cuda")
     release = json.loads((directory / "deployment.json").read_text())
     if release["schedule"] not in {"linear", "cosine"}:
         raise ValueError("deployment.json must specify linear or cosine")
@@ -49,10 +52,15 @@ async def lifespan(app: FastAPI):
     if (tokenizer.token_to_id("[MASK]") != model.config.mask_id
             or tokenizer.token_to_id("[PAD]") != model.config.pad_id):
         raise ValueError("Tokenizer special IDs do not match the checkpoint")
-    app.state.model = model.eval()
+    model = model.eval()
+    if dtype == "fp16":
+        model = model.half()
+    app.state.model = model
     app.state.tokenizer = tokenizer
     app.state.release = release
     app.state.device = device
+    app.state.dtype = dtype
+    app.state.gpu = torch.cuda.get_device_name(0) if device == "cuda" else None
     app.state.generation_lock = threading.Lock()
     yield
 
@@ -65,7 +73,8 @@ def health(request: Request):
     state = request.app.state
     return {"status": "ready", "model_version": state.release["model_version"],
             "code_ref": state.release["code_ref"], "schedule": state.release["schedule"],
-            "device": state.device, "context_length": state.model.config.seq_len}
+            "device": state.device, "dtype": state.dtype, "gpu": state.gpu,
+            "context_length": state.model.config.seq_len}
 
 
 @app.post("/generate")

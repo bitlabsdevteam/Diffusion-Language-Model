@@ -1,6 +1,6 @@
 """Phase 4: the masked-diffusion objective (forward noising and ELBO-weighted loss).
 
-Decisions (grilled 2026-11-21): continuous time t in (0, 1]; linear mask rate (cosine sin(pi*t/2) behind a flag
+Decisions (grilled 2026-11-22): continuous time t in (0, 1]; linear mask rate (cosine sin(pi*t/2) behind a flag
 for the Phase 7 ablation); stratified t; no time input to the model.
 
   * Mask rate  p(t) = (1 - EPS) * s(t) + EPS with s linear (s = t) or cosine, EPS = 1e-3 (LLaDA bounds t away from 0

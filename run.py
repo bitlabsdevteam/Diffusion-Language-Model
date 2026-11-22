@@ -7,7 +7,8 @@
     python run.py phase2 [args]    tokenize + block the Stories             (dlm/data.py)
     python run.py pretrain [args]  pre-train the model (Phase 5)            (dlm/train.py; --help for options)
     python run.py plot [--out DIR] [--watch SECONDS]   redraw the training curves from a run's history.json
-    python run.py sft | generate   interface skeletons (Phases 8, 6): exit 2 and name what to grill first
+    python run.py generate [args]  generate Stories from a trained run (Phase 6)  (dlm/sample.py; --help for options)
+    python run.py sft              interface skeleton (Phase 8): exits 2 and names what to grill first
 
 Everything after the command is passed to that command: `python run.py phase1 --help`.
 The same code runs on a laptop and in Colab (see run_colab.ipynb).
@@ -21,7 +22,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 TESTS = ("test_download.py", "test_tokenizer.py", "test_data.py", "test_model.py", "test_diffusion.py", "test_train.py",
-         "test_layout.py")
+         "test_sample.py", "test_layout.py")
 
 
 def run_tests() -> int:

@@ -1,7 +1,7 @@
 """Phase 5: pre-train the DLM. (Phase 8, fine-tuning, will be the same loop with --init-from and --task sft; it is
 still `not_built`: the instruction dataset has not been chosen.)
 
-Decisions (grilled 2026-11-21): plain PyTorch, single device, bf16 autocast when the CUDA GPU supports it and fp32
+Decisions (grilled 2026-11-22): plain PyTorch, single device, bf16 autocast when the CUDA GPU supports it and fp32
 otherwise (a Colab T4 has no bf16: use an L4 or A100; MPS/CPU runs are for smoke tests); AdamW, peak LR 2e-4, warmup
 1,000 steps, cosine decay to 10% of peak, weight decay 0.1 on matrices only (ndim >= 2), beta2 0.999, gradient
 clipping 1.0, batch 32 blocks, 40,000 steps. These values come from the old notebooks' proxy trials (hyper.md) on a

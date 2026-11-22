@@ -13,7 +13,6 @@ HEAVY = ("model", "diffusion", "train", "sample")        # may import torch
 # command -> text that must appear in the message (the phase and the thing to grill first)
 UNBUILT = {
     "sft": (["--init-from", "ckpt"], ("Phase 8", "instruction dataset")),
-    "generate": ([], ("Phase 6", "remasking")),
 }
 
 
@@ -58,6 +57,13 @@ def main():
     except SystemExit as e:
         code = e.code
     ok(code == 0, "`run.py pretrain --help` shows the training options (pretrain is built)")
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            run.main(["generate", "--help"])
+        code = None
+    except SystemExit as e:
+        code = e.code
+    ok(code == 0, "`run.py generate --help` shows the sampler options (generate is built)")
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         ok(run.main(["nonsense"]) == 2, "unknown command exits 2")

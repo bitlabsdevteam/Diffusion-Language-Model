@@ -43,3 +43,7 @@ _Avoid_: chunk, window, sequence (too generic), batch
 **Protected token**:
 A token that is never masked during training because it is always given at generation time: the [BOS] and the header of every Story in a Block (the prompt part of the chat template).
 _Avoid_: frozen token, fixed token, prompt mask
+
+**Decoding block**:
+A run of consecutive positions of the generated response (32 by default) that the sampler fills completely before moving on to the next one, so the response is built left to right while tokens inside the block are revealed most-confident first. Not the training Block.
+_Avoid_: an unqualified "block" (it means the training Block), chunk, window

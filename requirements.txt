@@ -10,3 +10,4 @@ transformers>=5.23
 torch
 matplotlib
 tensorboard  # optional: Colab ships it; without it only training_curves.png / history.json are written
+pillow  # only for `run.py generate --gif` (matplotlib already depends on it; Colab ships it)

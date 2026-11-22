@@ -1,0 +1,40 @@
+{
+  "params": {
+    "vocab_size": 8192,
+    "n_stories": 500000,
+    "seed": 0,
+    "cleaning_version": 1,
+    "phase0_revision": "f54c09fd23315a6f9c86f9dc80f725de7d8f9c64"
+  },
+  "special_tokens": [
+    "[PAD]",
+    "[UNK]",
+    "[BOS]",
+    "[EOS]",
+    "[MASK]",
+    "<|user|>",
+    "<|assistant|>",
+    "<|system|>",
+    "<|end|>"
+  ],
+  "template": "<|user|>\nWrite a short story.\n<|assistant|>\n{story}\n<|end|>\n",
+  "training_sample": {
+    "eligible_stories": 2119489,
+    "sampled_stories": 500000,
+    "sampled_with_mojibake": 30509
+  },
+  "verification": {
+    "validation_stories_checked": 21990,
+    "round_trip_exact": true,
+    "unk_tokens": 0,
+    "tokens_per_story_mean": 224.8,
+    "tokens_per_story_p50": 198,
+    "tokens_per_story_p90": 333,
+    "tokens_per_story_p99": 635,
+    "chars_per_token": 4.115,
+    "share_fitting_256_tokens": 0.8173
+  },
+  "created_at": "2026-11-21T05:12:14+00:00",
+  "tokenizers_version": "0.23.3",
+  "transformers_version": "5.23.0"
+}

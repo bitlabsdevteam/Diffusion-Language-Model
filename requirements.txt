@@ -1,0 +1,11 @@
+# Phase 0 (data download) dependencies only. Later phases add their own.
+datasets>=3.0
+huggingface_hub>=0.25
+pyarrow>=15
+# Phase 1 (tokenizer)
+tokenizers>=0.20
+transformers>=5.23
+# Phases 3-5 (model, objective, training). Colab ships torch and matplotlib: do not pin or reinstall them there,
+# and never add numpy (reinstalling it breaks Colab's live kernel).
+torch
+matplotlib

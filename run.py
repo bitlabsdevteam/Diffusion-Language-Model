@@ -8,6 +8,7 @@
     python run.py pretrain [args]  pre-train the model (Phase 5)            (dlm/train.py; --help for options)
     python run.py plot [--out DIR] [--watch SECONDS]   redraw the training curves from a run's history.json
     python run.py generate [args]  generate Stories from a trained run (Phase 6)  (dlm/sample.py; --help for options)
+    python run.py eval [args]      evaluate a trained run: likelihood, sample metrics, decoding sweep (Phase 7)  (dlm/evaluate.py)
     python run.py sft              interface skeleton (Phase 8): exits 2 and names what to grill first
 
 Everything after the command is passed to that command: `python run.py phase1 --help`.
@@ -22,7 +23,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 TESTS = ("test_download.py", "test_tokenizer.py", "test_data.py", "test_model.py", "test_diffusion.py", "test_train.py",
-         "test_sample.py", "test_layout.py")
+         "test_sample.py", "test_evaluate.py", "test_layout.py")
 
 
 def run_tests() -> int:
@@ -45,6 +46,9 @@ def main(argv: list[str]) -> int:
         return run(rest)
     if cmd == "phase1":
         from dlm.tokenizer import main as run
+        return run(rest)
+    if cmd == "eval":
+        from dlm.evaluate import main as run
         return run(rest)
     if cmd == "plot":
         from dlm.train import plot_main

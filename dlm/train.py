@@ -166,7 +166,8 @@ def atomic_save(obj, path: Path) -> None:
     os.replace(tmp, path)
 
 
-UNIGRAM_BASELINE = 5.87  # nats/token of a model that only knows token frequencies (validation tokens)
+UNIGRAM_BASELINE = 5.92  # nats/token of a model that only knows token frequencies, on the tokens the model predicts
+#                          (excludes the always-given [BOS] + header; 5.87 if they are counted). Exact value: run.py eval
 
 
 def moving_average(xs: list[float], k: int) -> list[float]:

@@ -7,6 +7,7 @@
     python run.py phase2 [args]    tokenize + block the Stories             (dlm/data.py)
     python run.py pretrain [args]  pre-train the model (Phase 5)            (dlm/train.py; --help for options)
     python run.py plot [--out DIR] [--watch SECONDS]   redraw the training curves from a run's history.json
+    python run.py export --resume <run>/resume.pt [--out DIR]   make an unfinished run's checkpoint loadable (generate/eval/hub)
     python run.py hub --run DIR --repo-id user/name [--dry-run]   publish a trained run to the Hugging Face Hub (dlm/hub.py)
     python run.py generate [args]  generate Stories from a trained run (Phase 6)  (dlm/sample.py; --help for options)
     python run.py eval [args]      evaluate a trained run: likelihood, sample metrics, decoding sweep (Phase 7)  (dlm/evaluate.py)
@@ -54,6 +55,9 @@ def main(argv: list[str]) -> int:
     if cmd == "hub":
         from dlm.hub import main as run
         return run(rest)
+    if cmd == "export":
+        from dlm.train import export_main
+        return export_main(rest)
     if cmd == "plot":
         from dlm.train import plot_main
         return plot_main(rest)

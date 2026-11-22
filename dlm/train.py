@@ -291,6 +291,47 @@ def fmt_time(sec: float) -> str:
     return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
 
 
+def export_checkpoint(resume: Path, out: Path | None = None, tokenizer_dir: Path | None = None) -> Path:
+    """Turn a run's resume.pt into a final/-style folder (model.pt, config.json, tokenizer/, history.json, export.json)
+    that `generate`, `eval` and `hub` can load, without finishing the run. Use it to try a model from an unfinished or
+    stopped run (its learning rate had not decayed to the floor, so expect a somewhat weaker model than a finished one)."""
+    resume = Path(resume)
+    ck = torch.load(resume, map_location="cpu", weights_only=False)
+    cfg = DLMConfig.from_dict(ck["recipe"]["model"])
+    model = DiffusionTransformerLM(cfg)
+    model.load_state_dict(ck["model"])
+    step = int(ck["step"])
+    out = Path(out) if out else resume.parent / f"export_step{step}"
+    model.save_pretrained(out)
+    tok = Path(tokenizer_dir) if tokenizer_dir else ROOT / "tokenizer"
+    if (tok / "tokenizer.json").is_file():
+        shutil.copytree(tok, out / "tokenizer", dirs_exist_ok=True)
+    (out / "history.json").write_text(json.dumps(ck["history"], indent=1) + "\n")
+    evals = [h for h in ck["history"] if "val" in h]
+    info = {"exported_from": resume.name, "step": step, "steps_planned": ck["recipe"]["steps"], "finished": False,
+            "last_val_bound": evals[-1]["val"] if evals else None, "tokenizer": str(tok if (out / "tokenizer").is_dir() else None),
+            "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    (out / "export.json").write_text(json.dumps(info, indent=2) + "\n")
+    return out
+
+
+def export_main(argv: list[str] | None = None) -> int:
+    """python run.py export --resume <run>/resume.pt [--out DIR] [--tokenizer-dir DIR]"""
+    p = argparse.ArgumentParser(description="Export a run's resume.pt as a loadable checkpoint folder.")
+    p.add_argument("--resume", type=Path, required=True, help="path to resume.pt")
+    p.add_argument("--out", type=Path, default=None, help="output folder (default: <resume dir>/export_step<N>)")
+    p.add_argument("--tokenizer-dir", type=Path, default=None, help="default: the repo's tokenizer/")
+    a = p.parse_args(argv)
+    if not a.resume.is_file():
+        print(f"No such file: {a.resume}", file=sys.stderr)
+        return 1
+    out = export_checkpoint(a.resume, a.out, a.tokenizer_dir)
+    info = json.loads((out / "export.json").read_text())
+    print(f"exported step {info['step']}/{info['steps_planned']} (last validation bound {info['last_val_bound']}) to {out}\n"
+          f"try it: python run.py generate --ckpt {out} --n 3")
+    return 0
+
+
 def plot_main(argv: list[str] | None = None) -> int:
     """python run.py plot [--out DIR] [--watch SECONDS]: redraw training_curves.png from history.json (works while
     a run is in progress in another terminal)."""

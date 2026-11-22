@@ -223,6 +223,24 @@ def main():
             pass
         ok((d / "b" / "best" / "model.pt").read_bytes() == before, "a failed write keeps the previous best/")
 
+    # export: an unfinished run's resume.pt becomes a loadable folder
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        tok = d / "tok"
+        tok.mkdir()
+        (tok / "tokenizer.json").write_text("{}")
+        part = run(d / "p", steps=8, eval_every=4, stop_at=4)
+        exp = tr.export_checkpoint(d / "p" / "resume.pt", tokenizer_dir=tok)
+        ok(exp == d / "p" / "export_step4" and all((exp / f).exists() for f in ("model.pt", "config.json", "history.json", "export.json", "tokenizer/tokenizer.json")), "export writes a final/-style folder next to resume.pt")
+        info = json.loads((exp / "export.json").read_text())
+        ok(info["step"] == 4 and info["steps_planned"] == 8 and info["finished"] is False, "export.json says it is unfinished")
+        amp = tr.make_amp("cpu", "fp32")[0]
+        val_idx = tr.evenly(32, tr.EVAL_BLOCKS)
+        v = tr.evaluate(load_model(exp), FakeBlocks(32, 3), val_idx, cfg(), "cpu", amp)
+        ok(v == [h for h in part["history"] if "val" in h][-1]["val"] == info["last_val_bound"], "the exported weights reproduce the evaluation logged at that step exactly")
+        ok(tr.export_main(["--resume", str(d / "p" / "resume.pt"), "--out", str(d / "o"), "--tokenizer-dir", str(tok)]) == 0 and (d / "o" / "model.pt").is_file(), "export CLI with --out")
+        ok(tr.export_main(["--resume", str(d / "missing.pt")]) == 1, "export CLI: missing file -> exit 1")
+
     # CLI behaviour
     try:
         tr.main(["--task", "sft", "--init-from", "x"])

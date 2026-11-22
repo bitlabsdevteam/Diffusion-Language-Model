@@ -7,6 +7,7 @@
     python run.py phase2 [args]    tokenize + block the Stories             (dlm/data.py)
     python run.py pretrain [args]  pre-train the model (Phase 5)            (dlm/train.py; --help for options)
     python run.py plot [--out DIR] [--watch SECONDS]   redraw the training curves from a run's history.json
+    python run.py hub --run DIR --repo-id user/name [--dry-run]   publish a trained run to the Hugging Face Hub (dlm/hub.py)
     python run.py generate [args]  generate Stories from a trained run (Phase 6)  (dlm/sample.py; --help for options)
     python run.py eval [args]      evaluate a trained run: likelihood, sample metrics, decoding sweep (Phase 7)  (dlm/evaluate.py)
     python run.py sft              interface skeleton (Phase 8): exits 2 and names what to grill first
@@ -23,7 +24,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 TESTS = ("test_download.py", "test_tokenizer.py", "test_data.py", "test_model.py", "test_diffusion.py", "test_train.py",
-         "test_sample.py", "test_evaluate.py", "test_colab.py", "test_layout.py")
+         "test_sample.py", "test_evaluate.py", "test_hub.py", "test_colab.py", "test_layout.py")
 
 
 def run_tests() -> int:
@@ -49,6 +50,9 @@ def main(argv: list[str]) -> int:
         return run(rest)
     if cmd == "eval":
         from dlm.evaluate import main as run
+        return run(rest)
+    if cmd == "hub":
+        from dlm.hub import main as run
         return run(rest)
     if cmd == "plot":
         from dlm.train import plot_main

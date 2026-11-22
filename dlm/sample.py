@@ -21,7 +21,7 @@ Decisions (grilled 2026-11-22, see PRD.md Phase 6):
   * A collapse warning fires when >= 60% of the generated tokens are the same token.
   * --trace prints the unmasking as text rows; --gif writes an animation (Pillow).
 
-CLI: python run.py generate --ckpt <run>/final [--prompt "..."] [--mode story|continue] [--n 3] [--seed 0] ...
+CLI: python run.py generate --ckpt <run>/final | --hf <user/name> [--prompt "..."] [--mode story|continue] [--n 3] [--seed 0] ...
 """
 from __future__ import annotations
 
@@ -248,19 +248,24 @@ def write_gif(result, tok, path, fps: int = 8, max_frames: int = 60, width: int 
 
 # ---------------------------------------------------------------- CLI
 def load_checkpoint(ckpt, device: str = "cpu"):
-    """(model, tokenizer) from a run's final/ folder (config.json, model.pt, tokenizer/tokenizer.json)."""
+    """(model, tokenizer) from a run's final/ folder (config.json, model.pt, tokenizer/tokenizer.json) or from a
+    Hugging Face layout folder (config.json, model.safetensors, tokenizer.json at the top level)."""
     from tokenizers import Tokenizer
 
     ckpt = Path(ckpt)
-    tok_file = ckpt / "tokenizer" / "tokenizer.json"
-    if not (ckpt / "model.pt").is_file() or not tok_file.is_file():
-        raise FileNotFoundError(f"{ckpt} needs model.pt, config.json and tokenizer/tokenizer.json (a run's final/ folder)")
+    tok_file = next((f for f in (ckpt / "tokenizer" / "tokenizer.json", ckpt / "tokenizer.json") if f.is_file()), None)
+    has_weights = (ckpt / "model.pt").is_file() or (ckpt / "model.safetensors").is_file()
+    if not has_weights or tok_file is None or not (ckpt / "config.json").is_file():
+        raise FileNotFoundError(f"{ckpt} needs config.json, model.pt or model.safetensors, and tokenizer.json "
+                                "(a run's final/ folder, or a folder downloaded from the Hugging Face Hub)")
     return load_model(ckpt, device), Tokenizer.from_file(str(tok_file))
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Generate Stories from a trained DLM (python run.py generate ...).")
-    p.add_argument("--ckpt", type=Path, required=True, help="a run's final/ folder")
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--ckpt", type=Path, help="a run's final/ folder (or a folder downloaded from the Hub)")
+    src.add_argument("--hf", metavar="REPO_ID", help="a model repo on the Hugging Face Hub, e.g. user/name (downloaded first)")
     p.add_argument("--prompt", default="", help="opening words of the Story (mode continue)")
     p.add_argument("--mode", choices=("story", "continue"), default=None, help="default: continue if --prompt is given")
     p.add_argument("--n", type=int, default=1, help="how many samples")
@@ -281,8 +286,12 @@ def main(argv: list[str] | None = None) -> int:
     from dlm.train import pick_device
 
     try:
+        if a.hf:
+            from dlm.hub import download_snapshot
+
+            a.ckpt = download_snapshot(a.hf)
         model, tok = load_checkpoint(a.ckpt, pick_device(a.device))
-    except FileNotFoundError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         print(f"generate: {e}", file=sys.stderr)
         return 1
     status = 0

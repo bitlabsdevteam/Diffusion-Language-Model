@@ -156,6 +156,7 @@ Each phase has an objective, deliverables, and acceptance criteria. "Status" is 
   - **Phase 10a (works with the current model):** custom PyTorch inference server (FastAPI wrapping `load_trained_model` + `diffusion_generate`), packaged in Docker, run on an EC2 GPU instance or a SageMaker bring-your-own-container endpoint; weights in S3; request schema with prompt, `max_new_tokens`, steps, temperature, block length; health check, timeouts, logging, load test.
   - **Phase 10b (optional, standard engine):** if the architecture is LLaDA-compatible, export in LLaDA's Hugging Face format and serve with SGLang's dLLM mode or dInfer on GPU, or llama.cpp GGUF for CPU/edge.
 - **Acceptance:** endpoint returns generations matching local output for the same seed/greedy; documented latency and cost per request at a target concurrency; infra described as code (CloudFormation/Terraform/CDK).
+- **Model publication on the Hugging Face Hub (built, optional, never uploaded):** `dlm/hub.py` / `python run.py hub` / notebook cell 13 build the standard Hub folder (`model.safetensors`, `config.json`, `generation_config.json`, tokenizer files, a `README.md` model card with YAML metadata, evaluation files) and, only on request, create a **private** repo and upload it. The model is not a `transformers` model, so it is loaded with this project's code (`run.py generate --hf user/name`); a transformers-native or `trust_remote_code` version would be a separate Phase 10b-style task. The licence on the card is the user's choice (default apache-2.0).
 - **Status:** not started; no AWS resources exist.
 
 ### Phase 11 (optional): Improvements
@@ -172,8 +173,8 @@ DLM/
   run.py              python run.py phase0 | phase1 | pretrain | sft | generate | test
   run_colab.ipynb     thin Colab runner (mount Drive, clone, pip install, call run.py)
   dlm/                download.py, cleaning.py, tokenizer.py   (built, Phases 0-1)
-                      data.py, model.py, diffusion.py, train.py, sample.py   (built: Phases 0-7 incl. model/diffusion/train/sample/evaluate; train.py --task sft is the only interface skeleton left, Phase 8)
-  tests/              offline tests (2,704 checks); `python run.py test`
+                      data.py, model.py, diffusion.py, train.py, sample.py   (built: Phases 0-7 incl. model/diffusion/train/sample/evaluate, plus colab.py and hub.py; train.py --task sft is the only interface skeleton left, Phase 8)
+  tests/              offline tests (2,776 checks); `python run.py test`
 ```
 
 The five skeleton modules each state what they own, consume and produce, and the open decisions to grill before building them; until then `python run.py pretrain|sft|generate|phase2` exits 2 and names the phase. Fine-tuning is `train.py` with `--init-from <pre-trained checkpoint> --task sft`: same loop, prompt never masked, loss on the response only.

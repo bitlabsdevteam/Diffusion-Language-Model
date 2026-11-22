@@ -11,7 +11,8 @@ attention (no causal mask), tied input/output embeddings, no time embedding, no 
   * Init: normal(0, 0.02) for every Linear and the embedding (no residual rescaling); recorded here on purpose.
   * Sizes: "base" = width 512, 10 layers, 8 heads, SwiGLU hidden 1376 (~2/3 of 2048, multiple of 32) ~35.8M
     parameters with the 8,192-token vocabulary; "tiny" is for tests and smoke runs.
-Saved as <dir>/config.json + <dir>/model.pt (see save_pretrained / load_model).
+Saved as <dir>/config.json + <dir>/model.pt (see save_pretrained / load_model); `dlm.hub` also writes
+`model.safetensors` for the Hugging Face Hub, and load_model reads either.
 """
 from __future__ import annotations
 
@@ -166,11 +167,28 @@ class DiffusionTransformerLM(nn.Module):
         torch.save(self.state_dict(), directory / "model.pt")
 
 
+def save_safetensors(model: DiffusionTransformerLM, path) -> None:
+    """Weights in the Hugging Face standard format. Tied weights are stored once (safetensors forbids shared tensors)."""
+    from safetensors.torch import save_model
+
+    save_model(model, str(path), metadata={"format": "pt"})
+
+
 def load_model(directory, device="cpu") -> DiffusionTransformerLM:
+    """Load a run's final/ folder or a Hugging Face layout folder: config.json plus model.pt or model.safetensors.
+    config.json may carry extra Hub keys (model_type, architectures); only the architecture fields are used."""
     directory = Path(directory)
-    cfg = DLMConfig.from_dict(json.loads((directory / "config.json").read_text()))
-    model = DiffusionTransformerLM(cfg)
-    model.load_state_dict(torch.load(directory / "model.pt", map_location="cpu"))
+    raw = json.loads((directory / "config.json").read_text())
+    fields = DLMConfig.__dataclass_fields__
+    model = DiffusionTransformerLM(DLMConfig.from_dict({k: v for k, v in raw.items() if k in fields}))
+    if (directory / "model.pt").is_file():
+        model.load_state_dict(torch.load(directory / "model.pt", map_location="cpu"))
+    elif (directory / "model.safetensors").is_file():
+        from safetensors.torch import load_model as load_safetensors
+
+        load_safetensors(model, str(directory / "model.safetensors"))
+    else:
+        raise FileNotFoundError(f"{directory} has neither model.pt nor model.safetensors")
     return model.to(device)
 
 

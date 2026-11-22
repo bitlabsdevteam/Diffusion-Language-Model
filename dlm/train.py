@@ -16,6 +16,11 @@ DIFFERENT architecture: starting points, not tuned for this model.
   * resume.pt (every `ckpt_every` steps) holds model, optimizer, step, history and all RNG states; a resumed run is
     bit-identical to an uninterrupted one on CPU (tested). It refuses to resume if the recipe or model config differs.
   * final/ = model.pt, config.json, tokenizer/, history.json, run_info.json (+ training_curves.png if matplotlib).
+  * best/ = the weights with the lowest validation bound seen at any evaluation (same layout as final/, plus
+    best.json with its step and numbers). There is NO early stopping: a run always goes to --steps, because the LR
+    schedule only reaches its floor at the last step. best/ is the safety net if validation turns around late. The
+    comparison uses the fixed 256-block evaluation (same noise draws every time, so evaluations are comparable within
+    a run); it is updated by replacing the folder atomically, so a disconnect mid-write never leaves a broken best/.
 
 Monitoring: a progress line every --print-every steps (step, epoch, loss, lr, grad norm, steps/s, ETA); an EVAL line
 every --eval-every; <out>/training_curves.png (loss, learning rate, epoch, grad norm) and <out>/history.json are
@@ -166,6 +171,35 @@ def atomic_save(obj, path: Path) -> None:
     os.replace(tmp, path)
 
 
+def read_best(out: Path) -> dict | None:
+    """best/best.json of a run if best/ is complete (model.pt present), else None."""
+    info, weights = Path(out) / "best" / "best.json", Path(out) / "best" / "model.pt"
+    if not (info.is_file() and weights.is_file()):
+        return None
+    try:
+        return json.loads(info.read_text())
+    except ValueError:
+        return None
+
+
+def save_best(model, out: Path, tokenizer_dir: Path | None, info: dict) -> Path:
+    """Write <out>/best/ (model.pt, config.json, tokenizer/, best.json). Built in best.tmp/ first and swapped in, so
+    an interrupted write leaves the previous best/ untouched."""
+    out = Path(out)
+    tmp, best, old = out / "best.tmp", out / "best", out / "best.old"
+    for d in (tmp, old):
+        shutil.rmtree(d, ignore_errors=True)
+    model.save_pretrained(tmp)
+    if tokenizer_dir and (Path(tokenizer_dir) / "tokenizer.json").is_file():
+        shutil.copytree(tokenizer_dir, tmp / "tokenizer", dirs_exist_ok=True)
+    (tmp / "best.json").write_text(json.dumps(info, indent=2) + "\n")
+    if best.exists():
+        os.replace(best, old)
+    os.replace(tmp, best)
+    shutil.rmtree(old, ignore_errors=True)
+    return best
+
+
 UNIGRAM_BASELINE = 5.92  # nats/token of a model that only knows token frequencies, on the tokens the model predicts
 #                          (excludes the always-given [BOS] + header; 5.87 if they are counted). Exact value: run.py eval
 
@@ -202,6 +236,9 @@ def plot_curves(history: list, path: Path) -> bool:
     if ev:
         ax.plot([h["step"] for h in ev], [h["val"] for h in ev], "o-", color="tab:red", label="validation")
         ax.plot([h["step"] for h in ev], [h["train_eval"] for h in ev], "s--", color="tab:green", label="train-eval")
+        top = min(ev, key=lambda h: h["val"])  # the checkpoint saved in best/
+        ax.plot([top["step"]], [top["val"]], "*", color="gold", markeredgecolor="black", markersize=14,
+                label=f"best validation {top['val']:.3f} (step {top['step']:,})")
     ax.axhline(UNIGRAM_BASELINE, color="gray", ls=":", label=f"token-frequency baseline ({UNIGRAM_BASELINE})")
     ax.set_ylabel("cross-entropy loss\n(ELBO-weighted, nats/token)")
     ax.legend(loc="upper right", fontsize=8)
@@ -299,6 +336,7 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
     tre_idx = evenly(len(traineval_blocks), EVAL_BLOCKS)
     recipe = recipe_of(a, cfg)
     history: list[dict] = []
+    best = None  # lowest-validation record; restored from best/best.json when resuming, else the first eval sets it
     writer = None if a.no_tensorboard else open_writer(out)
     epoch_of = lambda s_: s_ * a.batch_size / n_train  # noqa: E731  (float epochs: 1.0 = every train block seen once)
     start = 0
@@ -311,6 +349,7 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
         model.load_state_dict(ck["model"])
         opt.load_state_dict(ck["optimizer"])
         history, start = ck["history"], ck["step"]
+        best = read_best(out)
         set_rng_state(ck["rng"], gen)
         print(f"resumed from step {start}", flush=True)
     elif a.resume:
@@ -358,6 +397,10 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
             if a.schedule != "linear":
                 entry["val_own"] = evaluate(model, val_blocks, val_idx, cfg, device, amp, a.schedule)
             history.append(entry)
+            is_best = best is None or v < best["val"]
+            if is_best:
+                best = {"step": done, "epoch": epoch_of(done), "val": v, "train_eval": e}
+                save_best(model, out, tokenizer_dir, best)
             if writer:
                 writer.add_scalar("eval/validation", v, done)
                 writer.add_scalar("eval/train_eval", e, done)
@@ -365,8 +408,9 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
             write_live(out, history)  # history.json + training_curves.png are refreshed at every evaluation
             el = time.time() - t_start
             last = next((h for h in reversed(history) if "loss" in h), {"loss": float("nan")})
+            tag = "new best, saved to best/" if is_best else f"best {best['val']:.4f} @ step {best['step']}"
             print(f"EVAL step {done:>6}/{a.steps} | epoch {epoch_of(done):.3f} | train {last['loss']:.4f} | "
-                  f"train-eval {e:.4f} | val {v:.4f} | gap {v - e:+.4f} | {steps_done / el:.2f} steps/s", flush=True)
+                  f"train-eval {e:.4f} | val {v:.4f} | gap {v - e:+.4f} | {steps_done / el:.2f} steps/s | {tag}", flush=True)
         if done % a.ckpt_every == 0 and done < a.steps:
             atomic_save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": done, "history": history,
                          "rng": rng_state(gen), "recipe": recipe}, resume_path)
@@ -386,6 +430,9 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
     full_tre = evaluate(model, traineval_blocks, list(range(len(traineval_blocks))), cfg, device, amp)
     print(f"final | full validation bound {full_val:.4f} | full train-eval {full_tre:.4f} | gap {full_val - full_tre:+.4f}",
           flush=True)
+    if best:
+        print(f"best validation (256-block evaluation) {best['val']:.4f} at step {best['step']}; final weights are at "
+              f"step {end} -> best/ is {'the same as' if best['step'] == end else 'earlier than'} final/", flush=True)
     final = out / "final"
     model.save_pretrained(final)
     if tokenizer_dir and (Path(tokenizer_dir) / "tokenizer.json").is_file():
@@ -396,7 +443,7 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
         "steps_per_second": round(steps_done / max(elapsed, 1e-9), 3),
         "block_slots_per_second": round(steps_done * a.batch_size * a.seq_len / max(elapsed, 1e-9), 1),
         "seconds": round(elapsed, 1), "final_val_bound": full_val, "final_train_eval_bound": full_tre,
-        "torch": torch.__version__, "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "best": best, "torch": torch.__version__, "finished_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
     }
     (final / "run_info.json").write_text(json.dumps(info, indent=2) + "\n")
     plot_curves(history, final / "training_curves.png")

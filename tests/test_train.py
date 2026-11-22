@@ -177,6 +177,52 @@ def main():
         run(d / "fresh", steps=4, eval_every=4, resume=True)  # --resume with nothing to resume just starts
         ok((d / "fresh" / "final" / "model.pt").exists(), "--resume without resume.pt starts from scratch")
 
+    # best/ checkpoint (no early stopping: the run always reaches --steps)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        tok = d / "tok"
+        tok.mkdir()
+        (tok / "tokenizer.json").write_text("{}")
+        res = tr.run_training(args(steps=12, eval_every=4), cfg(), FakeBlocks(64), FakeBlocks(32, 3), FakeBlocks(16),
+                              d / "b", tokenizer_dir=tok)
+        ok(res["final"] and res["step"] == 12, "the run is never cut short by the best-checkpoint logic (no early stopping)")
+        bdir = d / "b" / "best"
+        evs = [h for h in res["history"] if "val" in h]
+        top = min(evs, key=lambda h: h["val"])
+        info = json.loads((bdir / "best.json").read_text())
+        ok(all((bdir / f).exists() for f in ("model.pt", "config.json", "best.json", "tokenizer/tokenizer.json")), "best/ has the final/ layout plus best.json")
+        ok(info["step"] == top["step"] and info["val"] == top["val"], "best.json = the lowest validation evaluation of the run")
+        ok(not (d / "b" / "best.tmp").exists() and not (d / "b" / "best.old").exists(), "no temporary folders are left behind")
+        ok(json.loads((d / "b" / "final" / "run_info.json").read_text())["best"]["step"] == top["step"], "run_info.json records the best step")
+        idx = list(range(len(FakeBlocks(32, 3))))
+        amp = tr.make_amp("cpu", "fp32")[0]
+        bm = load_model(bdir)
+        ok(tr.evaluate(bm, FakeBlocks(32, 3), idx, cfg(), "cpu", amp) > 0, "best/ loads with load_model")
+        # the saved weights are the weights AT the best step: re-evaluating on the 256-block protocol reproduces `val`
+        val_idx = tr.evenly(32, tr.EVAL_BLOCKS)
+        ok(tr.evaluate(bm, FakeBlocks(32, 3), val_idx, cfg(), "cpu", amp) == top["val"], "best/ weights reproduce the best validation number exactly")
+
+        # a worse evaluation never replaces best/: stop at 4, resume with a poisoned best that is unbeatable
+        run(d / "keep", steps=8, eval_every=4, stop_at=4)
+        keep_info = tr.read_best(d / "keep")
+        (d / "keep" / "best" / "best.json").write_text(json.dumps({**keep_info, "val": -1.0, "step": 4}))
+        mt = (d / "keep" / "best" / "model.pt").stat().st_mtime_ns
+        run(d / "keep", steps=8, eval_every=4, resume=True)
+        ok((d / "keep" / "best" / "model.pt").stat().st_mtime_ns == mt and tr.read_best(d / "keep")["val"] == -1.0, "resume restores best from best.json and does not overwrite it with a worse evaluation")
+        # an incomplete best/ (no model.pt) counts as no best
+        (d / "keep" / "best" / "model.pt").unlink()
+        ok(tr.read_best(d / "keep") is None, "a best/ without model.pt is ignored")
+        # an interrupted save leaves the old best/ intact
+        class Boom:
+            def save_pretrained(self, _):
+                raise OSError("disk full")
+        before = (d / "b" / "best" / "model.pt").read_bytes()
+        try:
+            tr.save_best(Boom(), d / "b", None, {"step": 0, "val": 0.0})
+        except OSError:
+            pass
+        ok((d / "b" / "best" / "model.pt").read_bytes() == before, "a failed write keeps the previous best/")
+
     # CLI behaviour
     try:
         tr.main(["--task", "sft", "--init-from", "x"])

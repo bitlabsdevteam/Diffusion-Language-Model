@@ -1,0 +1,8 @@
+# Allow-list: nothing else can reach the image, whatever ends up in the build context.
+*
+!dlm/
+!run.py
+!serve.py
+!entrypoint.py
+**/__pycache__
+**/*.pyc

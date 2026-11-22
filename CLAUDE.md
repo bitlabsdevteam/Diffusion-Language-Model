@@ -53,6 +53,8 @@ Reference papers in `PDF/` (read the relevant one before extending the notebooks
 
 ### Deployment plan (AWS inference). Researched 2026-11-21 via web search; nothing here has been run or deployed
 
+**AWS provisioning:** Use the credentials in `/Users/davidbong/Documents/DiffusionLanguageModel/DLM/AWS_credential.md` when provisioning AWS resources. This local file is git-ignored.
+
 Serving support is per model architecture. The notebooks' `DiffusionTransformerLM` (nn.TransformerEncoder, learned positions, optional time embedding, own tokenizer) is custom, so no off-the-shelf server loads it as is.
 - **vLLM:** corrected 2026-11-22: it now has native support for one diffusion model, DiffusionGemma (vLLM blog 2026-06-10), via a model-specific implementation on its speculative-decoding machinery; native LLaDA support was not found, and it is also a backend inside dInfer for LLaDA / LLaDA-MoE. Serving this project's model would need a custom vLLM model implementation plus a diffusion decode path (large, untried). NVIDIA GPU on Linux only.
 - **SGLang:** has an official dLLM mode (block diffusion via chunked prefill, `--dllm-algorithm` e.g. `LowConfidence` / `JointThreshold`; flag names differ between guides, check the installed version). Documented models are the LLaDA2.0 family (block diffusion). dInfer also has an SGLang backend for LLaDA2. Best off-the-shelf choice if the model is LLaDA2-compatible.

@@ -132,6 +132,57 @@ def main():
     ok(any("QUIT_WHEN_DONE = True" in s for s in order), "session ending is on by default")
     ok(not any("--sweep" in s and "RUN_SWEEP" not in s for s in order), "no cell runs the sweep unconditionally")
     ok("try:" in last and "except" in last, "an error in the quit cell keeps the session (never ends it by accident)")
+    # ---- test_pretrained_colab.ipynb (the inference-test notebook)
+    import contextlib
+    import io
+    import os
+    import re
+    nb2 = json.loads((ROOT / "test_pretrained_colab.ipynb").read_text())
+    c2 = [c for c in nb2["cells"] if c["cell_type"] == "code"]
+    s2 = ["".join(c["source"]) for c in c2]
+    ok(nb2["nbformat"] == 4 and all(isinstance(c["source"], list) for c in nb2["cells"]), "test notebook: valid structure")
+    for i, s_ in enumerate(s2):
+        compile(re.sub(r"^(\s*)[!%].*$", r"\1pass", s_, flags=re.M), f"cell{i}", "exec")
+    ok(True, "test notebook: every code cell compiles")
+    ok("finish_session" in s2[-1] and "try:" in s2[-1] and "except" in s2[-1], "test notebook: the LAST cell ends the session, guarded")
+    ok("QUIT_WHEN_DONE = True" in s2[0] and "PUSH_TO_HUB = False" in s2[0] and "HF_PRIVATE = True" in s2[0] and "HF_DRY_RUN = True" in s2[0], "test notebook: safe defaults (quits when done, no upload, private, dry run)")
+    ok(not any(re.search(r"hf_[A-Za-z0-9]{20,}", s_) for s_ in s2) and "token=" not in "".join(s2), "test notebook: no token inside")
+    ok(not any("pretrain" in s_ and "run.py pretrain" in s_ for s_ in s2), "test notebook: never trains")
+    pub = next(s_ for s_ in s2 if "publish(" in s_)
+    ok("if not PUSH_TO_HUB" in pub and "dry_run=HF_DRY_RUN" in pub and "except" in pub, "test notebook: publishing is skipped by default, honours the dry run, never raises")
+    ok("hf_" + "bitlabsdb" not in "".join(s2) and "bitlabsdb/" not in "".join(s2), "test notebook: no personal Hub name committed")
+
+    # cell 4 for real: a stopped run (resume.pt only) is exported to final/, a finished one is left alone
+    sys.path.insert(0, str(ROOT / "tests"))
+    import test_train as tt
+    cell3, cell4 = next(s for s in s2 if "def sh(" in s), next(s for s in s2 if s.startswith("# 4."))
+    here = os.getcwd()
+    os.chdir(ROOT)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "pretrain_base"
+            tt.run(run_dir, steps=8, eval_every=4, stop_at=4)
+            ns = {"RUN": str(run_dir), "CKPT": str(run_dir / "final")}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec("import subprocess, sys\ndef sh(" + cell3.split("def sh(")[1], ns)  # only the helper: the pip step is not run here
+                exec(cell4, ns)
+            out = buf.getvalue()
+            ok((run_dir / "final" / "model.pt").is_file() and "exporting resume.pt" in out and "stopped_at_step" in out, "test notebook cell 4: resume.pt only -> final/ is made and the stop step is shown")
+            before = (run_dir / "final" / "model.pt").stat().st_mtime_ns
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exec(cell4, ns)
+            ok("Using the model in" in buf.getvalue() and (run_dir / "final" / "model.pt").stat().st_mtime_ns == before, "test notebook cell 4: an existing final/ is used, not rewritten")
+            empty = {"RUN": str(Path(tmp) / "nothing"), "CKPT": str(Path(tmp) / "nothing" / "final")}
+            try:
+                exec(cell4, {**ns, **empty})
+                stopped = False
+            except SystemExit as e:
+                stopped = "Nothing to test" in str(e)
+            ok(stopped, "test notebook cell 4: nothing to test -> a clear message")
+    finally:
+        os.chdir(here)
     print(f"All {checks} Colab checks passed.")
 
 

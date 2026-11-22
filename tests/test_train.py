@@ -238,6 +238,8 @@ def main():
         val_idx = tr.evenly(32, tr.EVAL_BLOCKS)
         v = tr.evaluate(load_model(exp), FakeBlocks(32, 3), val_idx, cfg(), "cpu", amp)
         ok(v == [h for h in part["history"] if "val" in h][-1]["val"] == info["last_val_bound"], "the exported weights reproduce the evaluation logged at that step exactly")
+        ri = json.loads((exp / "run_info.json").read_text())
+        ok(ri["stopped_at_step"] == 4 and ri["recipe"]["steps"] == 8, "export writes run_info.json marking the run as stopped early")
         ok(tr.export_main(["--resume", str(d / "p" / "resume.pt"), "--out", str(d / "o"), "--tokenizer-dir", str(tok)]) == 0 and (d / "o" / "model.pt").is_file(), "export CLI with --out")
         ok(tr.export_main(["--resume", str(d / "missing.pt")]) == 1, "export CLI: missing file -> exit 1")
 

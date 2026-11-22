@@ -312,6 +312,8 @@ def export_checkpoint(resume: Path, out: Path | None = None, tokenizer_dir: Path
             "last_val_bound": evals[-1]["val"] if evals else None, "tokenizer": str(tok if (out / "tokenizer").is_dir() else None),
             "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
     (out / "export.json").write_text(json.dumps(info, indent=2) + "\n")
+    # run_info.json lets `hub` build the model card; `stopped_at_step` makes the card say it is an unfinished run
+    (out / "run_info.json").write_text(json.dumps({"recipe": ck["recipe"], "stopped_at_step": step, "parameters": model.num_parameters()}, indent=2) + "\n")
     return out
 
 

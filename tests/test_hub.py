@@ -307,6 +307,20 @@ def main():
         ok("NOT uploaded" in out_ and "no token" in out_, "an upload error is printed and never raised (the next cell still runs)")
     finally:
         hub.publish = real_publish
+    # an exported (stopped early) run builds a card that says so
+    import tempfile as _tf
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import test_train as _tt
+    from dlm import train as _tr
+    with _tf.TemporaryDirectory() as _d:
+        _d = Path(_d)
+        _tt.run(_d / "run", steps=8, eval_every=4, stop_at=4)
+        _tr.export_main(["--resume", str(_d / "run" / "resume.pt"), "--out", str(_d / "run" / "final")])
+        hub.prepare_folder(_d / "run", _d / "hubdir", "u/m")
+        card = (_d / "hubdir" / "README.md").read_text()
+        ok("Intermediate checkpoint" in card and "stopped at step 4" in card and "planned for 8 steps" in card, "card of a stopped run says it is an intermediate checkpoint")
+        ok("| Steps / batch size | 4 /" in card and "Training time" not in card, "card shows the steps actually trained and no invented training time")
+        ok((_d / "hubdir" / "model.safetensors").is_file(), "Hub folder is built from an exported run")
     import re
     ok(re.search(r"hf_[A-Za-z0-9]{20,}", "".join(code_cells)) is None and "token=" not in code_cells[pub], "no token in the notebook")
     print(f"All {checks} Hugging Face Hub checks passed.")

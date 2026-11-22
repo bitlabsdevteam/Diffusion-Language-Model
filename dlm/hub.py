@@ -117,11 +117,16 @@ def render_card_body(repo_id: str, name: str, model_info: dict, cfg: dict, run_i
     ]
     if run_info:
         r = run_info["recipe"]
+        stopped = run_info.get("stopped_at_step")
+        if stopped:
+            lines += [f"> **Intermediate checkpoint.** Training was planned for {r['steps']:,} steps and was stopped at step "
+                      f"{stopped:,}, before the learning-rate decay finished (the rate was still well above its final value). "
+                      "A completed run would be expected to score better.", ""]
         lines += [
             "Objective: masked-diffusion ELBO. Each block gets a random noise level, every maskable token is masked with that "
             "probability, and the loss is the cross-entropy on the masked tokens weighted by the ELBO factor.", "",
             "| | |", "|---|---|",
-            f"| Steps / batch size | {r['steps']:,} / {r['batch_size']} blocks of {r['seq_len']} tokens"
+            f"| Steps / batch size | {(stopped or r['steps']):,} / {r['batch_size']} blocks of {r['seq_len']} tokens"
             + (f" (about {epochs:.2f} epochs)" if epochs else "") + " |",
             f"| Optimizer | AdamW, peak learning rate {r['lr']}, betas ({r['beta1']}, {r['beta2']}), weight decay "
             f"{r['weight_decay']} on matrices only, gradient clipping {r['clip']} |",
@@ -129,7 +134,7 @@ def render_card_body(repo_id: str, name: str, model_info: dict, cfg: dict, run_i
             f"| Noise schedule | {r['schedule']} |",
             f"| Precision / device | {run_info.get('precision', '?')} / {run_info.get('device', '?')} |",
             f"| Seed | {r['seed']} |"]
-        if run_info.get("steps_per_second"):
+        if run_info.get("steps_per_second") and not stopped:
             # run_info only knows the LAST process (a run resumed after a disconnect reports just its final session),
             # so the total is estimated as steps / speed instead of being taken from the recorded seconds
             lines.append(f"| Training time | about {r['steps'] / run_info['steps_per_second'] / 3600:.2f} h (steps / speed of the last "

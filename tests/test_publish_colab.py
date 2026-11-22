@@ -101,6 +101,7 @@ def main():
             execute(name, ns)
         except exception as e:
             ok(text in str(e), f"{name}: actionable error: {text}")
+            return str(e)
         else:
             raise AssertionError(f"{name} should raise {exception.__name__}")
 
@@ -118,6 +119,35 @@ def main():
         root = Path(tmp)
         # The notebook's temporary export folders are cleaned up with this test's root.
         with patch.object(tempfile, "tempdir", str(root)):
+            # A guessed cosine-run path must identify the checkpoint actually saved on Drive.
+            drive_root = root / "Drive files" / "diffusion_lm_outputs"
+            available = drive_root / "checkpoints" / "pretrain_base" / "resume.pt"
+            available.parent.mkdir(parents=True)
+            available.touch()
+            missing = drive_root / "checkpoints" / "pretrain_cosine" / "resume.pt"
+            discovery = {"MODE": "publish", "Path": Path, "RESUME_PATH": str(missing),
+                         "CHECKPOINT_SEARCH_ROOT": str(drive_root), "TOKENIZER_DIR": "", "REPO_DIR": ROOT}
+            with patch("dlm.train.export_checkpoint") as exporter, patch.object(tempfile, "mkdtemp") as stage:
+                message = raises("export", discovery, FileNotFoundError, f"RESUME_PATH = {str(available)!r}")
+                ok(str(missing) in message and "cell 1" in message, "missing path and recovery instructions are shown")
+                raises("export", {**discovery, "RESUME_PATH": "  "}, FileNotFoundError, str(available))
+                other = drive_root / "checkpoints" / "another_run" / "resume.pt"
+                other.parent.mkdir(parents=True)
+                other.touch()
+                # Folders named resume.pt are not valid candidates.
+                decoy = drive_root / "not_a_checkpoint" / "resume.pt"
+                decoy.mkdir(parents=True)
+                message = raises("export", discovery, FileNotFoundError, str(available))
+                ok(str(other) in message and str(decoy) not in message, "all candidate files, and only files, are listed")
+                empty_root = root / "empty-output"
+                empty_root.mkdir()
+                message = raises("export", {**discovery, "CHECKPOINT_SEARCH_ROOT": str(empty_root)},
+                                 FileNotFoundError, "No resume.pt files found")
+                ok("CHECKPOINT_SEARCH_ROOT" in message, "empty search explains how to search a different folder")
+                raises("export", {**discovery, "CHECKPOINT_SEARCH_ROOT": str(root / "missing-output")},
+                       FileNotFoundError, "Search folder does not exist")
+                ok(not exporter.called and not stage.called, "discovery never exports an unselected run or creates staging files")
+
             for schedule in ("cosine", "linear"):
                 case = root / schedule
                 source, tokenizer_dir, original, tok = fixture(case, schedule)
@@ -127,7 +157,8 @@ def main():
                 (case / "final" / "model.pt").write_bytes(b"existing final sentinel")
                 fake = FakeHub(case)
                 ns = {"__name__": "__main__", "MODE": "publish", "HF_REPO_ID": "tester/dlm",
-                      "HF_PRIVATE": True, "HF_LICENSE": "mit", "RESUME_PATH": str(source),
+                       "HF_PRIVATE": True, "HF_LICENSE": "mit", "RESUME_PATH": str(source),
+                       "CHECKPOINT_SEARCH_ROOT": str(case),
                       "TOKENIZER_DIR": str(tokenizer_dir), "HF_REVISION": "main", "REPO_DIR": ROOT,
                       "CODE_COMMIT": "b" * 40, "SOURCE_REPO": "https://example.com/dlm.git",
                       "Path": Path, "json": json, "sys": sys, "subprocess": subprocess,
@@ -178,6 +209,21 @@ def main():
                 ok(source.read_bytes() == original_bytes and (case / "final" / "model.pt").read_bytes() == b"existing final sentinel",
                    "source checkpoint and existing final weights are untouched")
 
+                # The "load the deployed DLM" test cell: loads the downloaded HF snapshot in a fresh process.
+                def run_cell(name, namespace):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        exec(compile(cells[name], f"publish_hf_colab:{name}", "exec"), namespace)
+                    return out.getvalue()
+
+                text = run_cell("hf-load-test", {**ns, "TEST_MAX_NEW_TOKENS": 8})
+                ok("PASSED" in text and "loaded " in text and f"schedule {schedule}" in text, "deployed model loads from the HF snapshot and passes the test cell")
+                ok(text.count("--- prompt") == 3, "the test cell generates from every test prompt")
+                raises("hf-load-test", {**ns, "SNAPSHOT_DIR": case / "no-snapshot"}, RuntimeError, "download cell")
+                broken = shutil.copytree(ns["SNAPSHOT_DIR"], case / "broken-snapshot")
+                (broken / "model.safetensors").write_bytes(b"corrupted")
+                raises("hf-load-test", {**ns, "SNAPSHOT_DIR": broken, "TEST_MAX_NEW_TOKENS": 8}, RuntimeError, "failed the load test")
+
                 # Fresh-runtime mode: no Drive, exporter, or local model variables are available.
                 inference = {"MODE": "inference", "HF_REPO_ID": "tester/dlm", "HF_REVISION": "main"}
                 with patch("huggingface_hub.get_token", return_value=None), patch("huggingface_hub.HfApi", return_value=fake), \
@@ -189,6 +235,7 @@ def main():
                     execute(name, inference)
                 ok(len(mounts) == before_mounts and len(fake.uploads) == before_uploads, "inference-only mode never mounts Drive or uploads")
                 ok(fake.downloads[-1]["token"] is None, "public inference needs no token")
+                ok("PASSED" in run_cell("hf-load-test", {**inference, "TEST_MAX_NEW_TOKENS": 8}), "inference-only mode passes the deployed-model test")
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
                     exec(cells["reuse-snippet"], inference)
@@ -204,7 +251,9 @@ def main():
                 raises("download", ns, RuntimeError, "Complete the upload")
 
                 bad_ns = {**ns, "RESUME_PATH": str(case / "missing.pt")}
-                raises("export", bad_ns, FileNotFoundError, "RESUME_PATH")
+                raises("export", bad_ns, FileNotFoundError, str(source))
+                execute("export", {**ns, "RESUME_PATH": f"  {source}  "})
+                ok(True, "a selected existing path with surrounding whitespace exports successfully")
                 raises("export", {**ns, "TOKENIZER_DIR": str(case / "wrong-tokenizer")}, FileNotFoundError, "TOKENIZER_DIR")
                 old = case / "old.pt"
                 torch.save({"config": {}, "model": {}}, old)

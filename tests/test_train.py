@@ -118,6 +118,33 @@ def main():
         ok(len(ev) == 4 and ev[0]["step"] == 100, "evaluated every 100 steps")
         ok(ev[-1]["val"] < 0.5 * np.log(V), f"validation bound falls well below ln V ({ev[-1]['val']:.3f}; a plateau of ~100 steps first)")
         ok(ev[-1]["val"] < ev[0]["val"], "validation bound keeps falling")
+        # monitoring: epoch, live files, TensorBoard, plot command
+        trs = [h for h in res["history"] if "loss" in h]
+        ok(all(abs(h["epoch"] - h["step"] * 8 / 64) < 1e-9 for h in trs), "epoch = step * batch / train blocks, on every log entry")
+        ok(all(h["epoch"] == trs[i]["epoch"] or h["epoch"] > trs[i]["epoch"] for i, h in enumerate(trs[1:], 0)), "epoch never decreases")
+        ok(abs(trs[-1]["epoch"] - 50.0) < 1e-9, "400 steps of 8 blocks over 64 blocks = 50 epochs")
+        ok(all("epoch" in h for h in res["history"] if "val" in h), "evaluation entries carry the epoch")
+        ok(all({"lr", "grad_norm", "loss"} <= h.keys() for h in trs), "log entries hold loss, lr and grad norm")
+        a_dir = d / "a"
+        ok((a_dir / "history.json").is_file() and (a_dir / "training_curves.png").is_file(), "live history.json + curves in the run folder")
+        png = (a_dir / "training_curves.png").read_bytes()
+        ok(png[:8] == b"\x89PNG\r\n\x1a\n" and len(png) > 20_000, "training_curves.png is a real PNG with content")
+        ok(len(json.loads((a_dir / "history.json").read_text())) == len(res["history"]), "live history.json is complete after the run")
+        from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+        acc = EventAccumulator(str(a_dir / "tb"))
+        acc.Reload()
+        tags = set(acc.Tags()["scalars"])
+        want = {"train/cross_entropy_loss", "train/learning_rate", "train/epoch", "train/grad_norm", "eval/validation", "eval/train_eval", "eval/gap"}
+        ok(want <= tags, f"TensorBoard has loss, learning rate, epoch, grad norm and eval scalars (missing {want - tags})")
+        ok(len(acc.Scalars("train/epoch")) == len(trs) and acc.Scalars("train/epoch")[-1].value == trs[-1]["epoch"], "TensorBoard epoch matches history")
+        png_before = (a_dir / "training_curves.png").stat().st_mtime_ns
+        ok(tr.plot_main(["--out", str(a_dir)]) == 0 and (a_dir / "training_curves.png").stat().st_mtime_ns >= png_before, "`plot` redraws the curves from history.json")
+        ok(tr.plot_main(["--out", str(d / "does_not_exist")]) == 1, "`plot` on an empty folder exits 1")
+        ok(tr.moving_average([1, 2, 3, 4], 2) == [1.0, 1.5, 2.5, 3.5], "moving average")
+        ok(tr.fmt_time(75) == "1m15s" and tr.fmt_time(3725) == "1h02m", "ETA formatting")
+        quiet = run(d / "quiet", steps=4, eval_every=4, no_tensorboard=True)
+        ok(not (d / "quiet" / "tb").exists() and (d / "quiet" / "training_curves.png").is_file(), "--no-tensorboard skips tb/, curves still written")
+
         fin = d / "a" / "final"
         ok(all((fin / f).exists() for f in ("model.pt", "config.json", "history.json", "run_info.json")), "final/ contents")
         info = json.loads((fin / "run_info.json").read_text())
@@ -133,6 +160,7 @@ def main():
         full = run(d / "full", steps=8, eval_every=4)
         part = run(d / "part", steps=8, eval_every=4, stop_at=4)
         ok(part["final"] is False and (d / "part" / "resume.pt").exists(), "--stop-at saves resume.pt and no final")
+        ok((d / "part" / "history.json").is_file() and (d / "part" / "training_curves.png").is_file(), "curves are available before the run finishes")
         done = run(d / "part", steps=8, eval_every=4, resume=True)
         same = all(torch.equal(p, q) for p, q in zip(full["model"].state_dict().values(), done["model"].state_dict().values()))
         ok(same, "resumed run matches the uninterrupted run bit for bit")

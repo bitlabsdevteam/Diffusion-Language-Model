@@ -6,6 +6,7 @@
     python run.py test             run all offline tests                    (tests/)
     python run.py phase2 [args]    tokenize + block the Stories             (dlm/data.py)
     python run.py pretrain [args]  pre-train the model (Phase 5)            (dlm/train.py; --help for options)
+    python run.py plot [--out DIR] [--watch SECONDS]   redraw the training curves from a run's history.json
     python run.py sft | generate   interface skeletons (Phases 8, 6): exit 2 and name what to grill first
 
 Everything after the command is passed to that command: `python run.py phase1 --help`.
@@ -44,6 +45,9 @@ def main(argv: list[str]) -> int:
     if cmd == "phase1":
         from dlm.tokenizer import main as run
         return run(rest)
+    if cmd == "plot":
+        from dlm.train import plot_main
+        return plot_main(rest)
     if cmd == "test":
         return run_tests()
     if cmd in ("phase2", "pretrain", "sft", "generate"):

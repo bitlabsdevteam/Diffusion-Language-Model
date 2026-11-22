@@ -12,7 +12,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-**Repo: `bitlabsdevteam/Diffusion-Language-Model`** (https://github.com/bitlabsdevteam/Diffusion-Language-Model). This working folder is not yet a git clone, so `gh` cannot infer the repo: pass `-R bitlabsdevteam/Diffusion-Language-Model` on every `gh issue` / `gh label` / `gh api` call (and use that owner/repo in the `repos/<owner>/<repo>/...` paths below). Once the folder is a clone with `origin` pointing at that repo, `-R` is no longer needed.
+**Repo: `bitlabsdevteam/Diffusion-Language-Model`** (https://github.com/bitlabsdevteam/Diffusion-Language-Model). This working folder is a git clone with `origin` pointing at it, so `gh` infers the repo and `-R` is not needed. (Outside the clone, pass `-R bitlabsdevteam/Diffusion-Language-Model` and use that owner/repo in the `repos/<owner>/<repo>/...` paths below.)
 
 ## Pull requests as a triage surface
 

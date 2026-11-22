@@ -17,6 +17,11 @@ DIFFERENT architecture: starting points, not tuned for this model.
     bit-identical to an uninterrupted one on CPU (tested). It refuses to resume if the recipe or model config differs.
   * final/ = model.pt, config.json, tokenizer/, history.json, run_info.json (+ training_curves.png if matplotlib).
 
+Monitoring: a progress line every --print-every steps (step, epoch, loss, lr, grad norm, steps/s, ETA); an EVAL line
+every --eval-every; <out>/training_curves.png (loss, learning rate, epoch, grad norm) and <out>/history.json are
+refreshed at every evaluation; TensorBoard scalars go to <out>/tb (tensorboard --logdir <out>/tb); redraw anytime with
+`python run.py plot --out <out> [--watch 60]`.
+
 CLI: python run.py pretrain [--size base|tiny --steps N --out DIR --resume ...]
 """
 from __future__ import annotations
@@ -161,7 +166,23 @@ def atomic_save(obj, path: Path) -> None:
     os.replace(tmp, path)
 
 
+UNIGRAM_BASELINE = 5.87  # nats/token of a model that only knows token frequencies (validation tokens)
+
+
+def moving_average(xs: list[float], k: int) -> list[float]:
+    out, run = [], []
+    for x in xs:
+        run.append(x)
+        if len(run) > k:
+            run.pop(0)
+        out.append(sum(run) / len(run))
+    return out
+
+
 def plot_curves(history: list, path: Path) -> bool:
+    """Standard training trace in four stacked panels sharing the step axis: cross-entropy loss (train raw + moving
+    average, train-eval, validation), learning rate, epoch, gradient norm. Dotted vertical lines mark epoch
+    boundaries. Needs matplotlib (skipped with a message if it is missing)."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -171,20 +192,91 @@ def plot_curves(history: list, path: Path) -> bool:
         return False
     tr = [h for h in history if "loss" in h]
     ev = [h for h in history if "val" in h]
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, axes = plt.subplots(4, 1, figsize=(9, 11), sharex=True, gridspec_kw={"height_ratios": [3, 1.3, 1.2, 1.2]})
+    ax = axes[0]
     if tr:
-        ax.plot([h["step"] for h in tr], [h["loss"] for h in tr], alpha=0.5, label="train loss (avg)")
+        steps, loss = [h["step"] for h in tr], [h["loss"] for h in tr]
+        ax.plot(steps, loss, color="tab:blue", alpha=0.25, label="train (per log interval)")
+        ax.plot(steps, moving_average(loss, 10), color="tab:blue", label="train (moving average of 10)")
     if ev:
-        ax.plot([h["step"] for h in ev], [h["val"] for h in ev], "o-", label="validation bound")
-        ax.plot([h["step"] for h in ev], [h["train_eval"] for h in ev], "s--", label="train-eval bound")
-    ax.axhline(5.87, color="gray", ls=":", label="unigram baseline (5.87)")
-    ax.set_xlabel("step")
-    ax.set_ylabel("loss (nats per token)")
-    ax.legend()
+        ax.plot([h["step"] for h in ev], [h["val"] for h in ev], "o-", color="tab:red", label="validation")
+        ax.plot([h["step"] for h in ev], [h["train_eval"] for h in ev], "s--", color="tab:green", label="train-eval")
+    ax.axhline(UNIGRAM_BASELINE, color="gray", ls=":", label=f"token-frequency baseline ({UNIGRAM_BASELINE})")
+    ax.set_ylabel("cross-entropy loss\n(ELBO-weighted, nats/token)")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(alpha=0.3)
+    if tr:
+        last = tr[-1]
+        v = f" | val {ev[-1]['val']:.3f}" if ev else ""
+        ax.set_title(f"step {last['step']:,} | epoch {last.get('epoch', 0):.3f} | loss {last['loss']:.3f}{v} | lr {last['lr']:.2e}")
+        axes[1].plot([h["step"] for h in tr], [h["lr"] for h in tr], color="tab:orange")
+        axes[2].plot([h["step"] for h in tr], [h.get("epoch", 0) for h in tr], color="tab:purple")
+        axes[3].plot([h["step"] for h in tr], [h["grad_norm"] for h in tr], color="tab:brown")
+        e_max = int(tr[-1].get("epoch", 0))
+        for e in range(1, e_max + 1):  # epoch boundaries
+            first = next((h["step"] for h in tr if h.get("epoch", 0) >= e), None)
+            if first is not None:
+                for a_ in axes:
+                    a_.axvline(first, color="gray", ls=":", alpha=0.6)
+    axes[1].set_ylabel("learning rate")
+    axes[2].set_ylabel("epoch")
+    axes[3].set_ylabel("grad norm\n(before clipping)")
+    axes[3].set_xlabel("step")
+    for a_ in axes[1:]:
+        a_.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(path, dpi=120)
+    fig.savefig(path, dpi=110)
     plt.close(fig)
     return True
+
+
+def write_live(out: Path, history: list) -> None:
+    """Refresh history.json and training_curves.png in the output folder (called at every evaluation)."""
+    tmp = out / "history.json.tmp"
+    tmp.write_text(json.dumps(history, indent=1) + "\n")
+    os.replace(tmp, out / "history.json")
+    plot_curves(history, out / "training_curves.png")
+
+
+def open_writer(out: Path):
+    """TensorBoard writer (<out>/tb) if tensorboard is installed, else None."""
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+        return SummaryWriter(str(out / "tb"))
+    except Exception as e:  # tensorboard missing or broken: the PNG and history.json still work
+        print(f"TensorBoard logging off ({type(e).__name__}); using training_curves.png / history.json only", flush=True)
+        return None
+
+
+def fmt_time(sec: float) -> str:
+    sec = int(max(sec, 0))
+    return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec >= 3600 else f"{sec // 60}m{sec % 60:02d}s"
+
+
+def plot_main(argv: list[str] | None = None) -> int:
+    """python run.py plot [--out DIR] [--watch SECONDS]: redraw training_curves.png from history.json (works while
+    a run is in progress in another terminal)."""
+    p = argparse.ArgumentParser(description="Redraw the training curves from a run's history.json.")
+    p.add_argument("--out", type=Path, default=None, help="run folder (default: the pretrain_base folder)")
+    p.add_argument("--watch", type=float, default=None, metavar="SECONDS", help="keep redrawing every SECONDS")
+    args = p.parse_args(argv)
+    out = (args.out or default_checkpoint_dir("base")).expanduser().resolve()
+    while True:
+        src = next((f for f in (out / "history.json", out / "final" / "history.json") if f.is_file()), None)
+        if src is None:
+            print(f"No history.json in {out} yet.", file=sys.stderr)
+            if args.watch is None:
+                return 1
+        else:
+            hist = json.loads(src.read_text())
+            if plot_curves(hist, out / "training_curves.png"):
+                print(f"wrote {out / 'training_curves.png'} ({len(hist)} history entries, last step "
+                      f"{max((h['step'] for h in hist), default=0):,})", flush=True)
+            elif args.watch is None:
+                return 1
+        if args.watch is None:
+            return 0
+        time.sleep(args.watch)
 
 
 # ---------------------------------------------------------------- the loop
@@ -206,6 +298,8 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
     tre_idx = evenly(len(traineval_blocks), EVAL_BLOCKS)
     recipe = recipe_of(a, cfg)
     history: list[dict] = []
+    writer = None if a.no_tensorboard else open_writer(out)
+    epoch_of = lambda s_: s_ * a.batch_size / n_train  # noqa: E731  (float epochs: 1.0 = every train block seen once)
     start = 0
     resume_path = out / "resume.pt"
     if a.resume and resume_path.exists():
@@ -244,23 +338,41 @@ def run_training(a, cfg: DLMConfig, train_blocks, val_blocks, traineval_blocks, 
             avg = float(run_sum) / run_n
             if not math.isfinite(avg):
                 raise RuntimeError(f"loss is {avg} at step {done}: stopping")
-            history.append({"step": done, "loss": avg, "lr": lr, "grad_norm": float(gn)})
+            epoch = epoch_of(done)
+            history.append({"step": done, "epoch": epoch, "loss": avg, "lr": lr, "grad_norm": float(gn)})
             run_sum, run_n = torch.zeros((), device=device), 0
+            if writer:
+                writer.add_scalar("train/cross_entropy_loss", avg, done)
+                writer.add_scalar("train/learning_rate", lr, done)
+                writer.add_scalar("train/epoch", epoch, done)
+                writer.add_scalar("train/grad_norm", float(gn), done)
+            if done % a.print_every == 0 or done == end:
+                sps = steps_done / max(time.time() - t_start, 1e-9)
+                print(f"step {done:>6}/{a.steps} | epoch {epoch:.3f} | loss {avg:.4f} | lr {lr:.2e} | "
+                      f"grad {float(gn):.2f} | {sps:.2f} steps/s | eta {fmt_time((a.steps - done) / sps)}", flush=True)
         if done % a.eval_every == 0 or done == a.steps:
             v = evaluate(model, val_blocks, val_idx, cfg, device, amp)
             e = evaluate(model, traineval_blocks, tre_idx, cfg, device, amp)
-            entry = {"step": done, "val": v, "train_eval": e, "gap": v - e}
+            entry = {"step": done, "epoch": epoch_of(done), "val": v, "train_eval": e, "gap": v - e}
             if a.schedule != "linear":
                 entry["val_own"] = evaluate(model, val_blocks, val_idx, cfg, device, amp, a.schedule)
             history.append(entry)
+            if writer:
+                writer.add_scalar("eval/validation", v, done)
+                writer.add_scalar("eval/train_eval", e, done)
+                writer.add_scalar("eval/gap", v - e, done)
+            write_live(out, history)  # history.json + training_curves.png are refreshed at every evaluation
             el = time.time() - t_start
             last = next((h for h in reversed(history) if "loss" in h), {"loss": float("nan")})
-            print(f"step {done:>6}/{a.steps} | lr {lr:.2e} | train {last['loss']:.4f} | train-eval {e:.4f} | "
-                  f"val {v:.4f} | gap {v - e:+.4f} | {steps_done / el:.2f} steps/s", flush=True)
+            print(f"EVAL step {done:>6}/{a.steps} | epoch {epoch_of(done):.3f} | train {last['loss']:.4f} | "
+                  f"train-eval {e:.4f} | val {v:.4f} | gap {v - e:+.4f} | {steps_done / el:.2f} steps/s", flush=True)
         if done % a.ckpt_every == 0 and done < a.steps:
             atomic_save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": done, "history": history,
                          "rng": rng_state(gen), "recipe": recipe}, resume_path)
     elapsed = time.time() - t_start
+    if writer:
+        writer.close()
+    write_live(out, history)
 
     if end < a.steps:  # stopped early on purpose (--stop-at): save a resume point, no final
         atomic_save({"model": model.state_dict(), "optimizer": opt.state_dict(), "step": end, "history": history,
@@ -316,7 +428,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--schedule", choices=("linear", "cosine"), default="linear")
     p.add_argument("--eval-every", type=int, default=500)
     p.add_argument("--ckpt-every", type=int, default=1000)
-    p.add_argument("--log-every", type=int, default=25)
+    p.add_argument("--log-every", type=int, default=25, help="record loss/lr/epoch/grad-norm every N steps (the curves)")
+    p.add_argument("--print-every", type=int, default=100, help="print a progress line every N steps (use a multiple of --log-every)")
+    p.add_argument("--no-tensorboard", action="store_true", help="do not write TensorBoard logs to <out>/tb")
     p.add_argument("--device", default="auto", help="auto | cuda | mps | cpu")
     p.add_argument("--precision", choices=("auto", "bf16", "fp32"), default="auto")
     return p

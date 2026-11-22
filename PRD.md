@@ -1,7 +1,7 @@
 # PRD: Diffusion Language Model (DLM) from Scratch
 
-Status date: 2026-11-21. Main project folder: `/Users/davidbong/Documents/DiffusionLanguageModel/DLM/`.
-Prototype code (notebooks, scripts, research notes) still lives in the parent folder `/Users/davidbong/Documents/DiffusionLanguageModel/` and is referenced below by file name.
+Status date: 2026-11-21. Main project folder: `DLM/` (the git repo root; remote `bitlabsdevteam/Diffusion-Language-Model`).
+Prototype code (notebooks, scripts, research notes) still lives in the parent folder `../` (outside the repo) and is referenced below by file name.
 
 ## 1. What this project is
 
@@ -19,7 +19,7 @@ A **discrete (masked) diffusion language model** built from scratch: we pre-trai
 
 **Forward process (training).** Take a clean sequence, draw `t` in (0,1], replace each token by `[MASK]` with probability `t` (the *noise schedule* decides how mask rate depends on time). **Reverse process (inference).** Begin with the response all `[MASK]`; at each step the model predicts every masked position, we commit the most confident predictions and leave the rest masked, until nothing is masked.
 
-### Reference papers (`/Users/davidbong/Documents/DiffusionLanguageModel/PDF/`)
+### Reference papers (`../PDF/`, outside the repo)
 
 | File | Paper | Used for |
 |---|---|---|
@@ -86,27 +86,24 @@ Each phase has an objective, deliverables, and acceptance criteria. "Status" is 
 
 ### Phase 3: Model architecture
 
-- **Objective:** a bidirectional Transformer that predicts the original token at every masked position.
-- **Work (current prototype):** `DiffusionTransformerLM`: `nn.TransformerEncoder`, pre-norm, GELU, learned position embeddings, optional timestep embedding (`USE_TIME_EMB`, off by default), tied input/output embeddings, **no causal mask**. Base size 512 x 10 layers x 8 heads, FFN 2048 (~45M parameters).
-- **Open decision (blocks Phase 9/10):** the prototype is custom, so no serving framework loads it. For a standard serving path the full-scale model should use LLaDA-style blocks (RMSNorm, RoPE, SwiGLU, no time embedding). See Section 5.
-- **Acceptance:** forward pass returns logits of shape `[batch, seq, vocab]`; parameter count matches config; config round-trips through `config.json`.
-- **Status:** prototype implemented; LLaDA-compatible architecture **not started**.
+- **Decision (grilled 2026-11-21, ADR `docs/adr/0001-llada-style-architecture.md`):** a LLaDA-style bidirectional Transformer in `dlm/model.py`: RMSNorm, RoPE, SwiGLU, no biases, tied input/output embeddings, **no time embedding**, init normal(0, 0.02), `F.scaled_dot_product_attention` with `is_causal=False`. This keeps the SGLang / dInfer / GGUF serving options open (Phase 10b). `[PAD]` is masked out as an attention key (consistent with never being predicted); what fills the window after a generated `[EOS]` is a Phase 6 question.
+- **Size:** width 512, 10 layers, 8 heads, SwiGLU hidden 1376 (about 2/3 of 2048): **35.83M parameters** with the 8,192-token vocabulary (the grill said "about 40M"; this is the exact figure). A "tiny" preset (0.62M) exists for tests and smoke runs.
+- **Acceptance:** logits `[B, L, vocab]`; parameter count equals the analytic count; tied weights counted once; attention is bidirectional; extra `[PAD]` does not change the logits at real positions; RoPE preserves norms and scores depend only on relative position; save/load is exact; all parameters receive gradients.
+- **Status: built (2026-11-21).** `tests/test_model.py`, 20 checks. Not yet exported to LLaDA's Hugging Face format (Phase 10b).
 
 ### Phase 4: Diffusion objective (forward noising and loss)
 
-- **Objective:** a correct masked-diffusion training signal.
-- **Work:** per sequence draw `t`, mask non-protected tokens with probability from the noise schedule (`linear`, or MaskGIT/MD4 cosine `sin(pi*u/2)`; the cosine notebook also uses stratified `t`). Cross-entropy on masked positions only, weighted by the ELBO factor `1/t` (`LOSS_WEIGHTING="elbo"`), so validation loss is a per-token likelihood bound. `[BOS]`/`[EOS]` are maskable so the model learns where stories end.
-- **Acceptance:** Monte Carlo check that a uniform-random model gives loss ~ `ln(V)`; `E[w*p] = 1`; the prompt header is never masked. (`python test_cosine_notebook.py`, 70 checks, passes on CPU/synthetic.)
-- **Open decision (to grill at the start of Phase 4):** noise schedule. Proposed default: linear for training and sampling, with cosine tested as a Phase 7 ablation (2x2 of training x sampling schedule), and whether training and sampling schedules should match.
-- **Status:** implemented and unit-tested; schedule choice (linear vs cosine) is still an open ablation. Cosine is not expected to lower the val bound, only to help sample quality per step.
+- **Decisions (grilled 2026-11-21):** `dlm/diffusion.py`. Continuous time `t` in (0, 1], linear mask rate `p(t) = (1 - 1e-3) t + 1e-3` (the bound keeps `1/p` finite, as in LLaDA's code), stratified `t`, cosine `sin(pi t / 2)` behind `--schedule` for the Phase 7 ablation, no time input. ELBO weight `p'(t)/p(t)`, so `E[w p] = 1 - 1e-3`. Protected tokens and `[PAD]` are never masked. Loss per block = sum of weighted cross-entropy over masked tokens / number of maskable tokens in the block; training loss = mean over blocks. Validation is reported under the linear schedule as a per-token bound (token-weighted over the evaluation set).
+- **Acceptance:** `E[w p]` matches `1 - EPS` by numerical integration for both schedules; the stratified `t` has exactly one draw per stratum and a uniform marginal; protected and `[PAD]` tokens are never masked; the empirical mask rate matches `p(t)`; **a uniform-logits model scores (1 - EPS) * ln V over many batches for both schedules (tested with V = 64, not 8,192)**; a perfect predictor scores about 0; a fully protected block gives 0 and no NaN; the loss uses only its own generator (the global RNG is untouched).
+- **Status: built (2026-11-21).** `tests/test_diffusion.py`, 31 checks. The cosine-schedule ablation itself (Phase 7) is not run.
 
 ### Phase 5: Pre-training
 
-- **Objective:** a trained base model whose validation loss is clearly below the token-frequency plateau.
-- **Work:** HF `accelerate` (bf16 where supported), AdamW with cosine-warmup LR, peak LR 2e-4, weight decay 0.1, batch 32, `TRAIN_STEPS=40,000` in `budget_100`. Resumable checkpoints (`resume.pt` every `CKPT_EVERY` steps, final to `checkpoints/final/{model.pt,config.json,tokenizer/,history.json,run_info.json}`), loss logging (train, train-eval, val, gap), training-curve plot. Staged hyperparameter search exists but is off by default.
-- **Known risk:** the loss sits on the ~5.7-5.8 "token frequency" plateau for the first thousands of steps. In 12 proxy trials (`hyper.md`) LR, `token_mean`, and the time embedding did not matter; turning random-length crops off helped (5.33 vs 5.62 at 1,000 steps). The full 40,000-step run has not been done.
-- **Acceptance:** val loss falls well below ~5.7 and keeps improving; a reloaded checkpoint reproduces eval loss; a resumed run matches an uninterrupted one.
-- **Status:** training code complete and tested on CPU/synthetic; **real TinyStories pre-training not completed**.
+- **Decisions (grilled 2026-11-21):** `dlm/train.py` (`python run.py pretrain`), plain PyTorch on one device; bf16 autocast only on a CUDA GPU that supports it (otherwise fp32; a Colab T4 would be slow, use an L4 or A100). AdamW, peak LR 2e-4, warmup 1,000 steps, cosine decay to 10% of peak, weight decay 0.1 on matrices only, beta2 0.999, gradient clipping 1.0, batch 32 blocks (16,384 token slots), 40,000 steps (about 1.14 passes over the 1,123,259 train blocks). **These values come from the old notebooks' proxy trials (`hyper.md`) on a different architecture; they are starting points, not tuned for this model.** Evaluation every 500 steps on 256 evenly spaced validation blocks and 256 train-eval blocks with fixed `t` and a separately seeded generator; full validation (11,451 blocks) and train-eval (2,774) at the end; `resume.pt` every 1,000 steps; `final/{model.pt, config.json, tokenizer/, history.json, run_info.json, training_curves.png}`; **training trace:** progress line (step, epoch, loss, lr, grad norm, steps/s, ETA) every 100 steps, and the loss / learning rate / epoch / grad norm recorded every 25 steps and drawn in `training_curves.png` (4 panels, with validation and train-eval and the 5.87 baseline), refreshed at every evaluation together with `history.json`; TensorBoard scalars in `<out>/tb`; `python run.py plot --out DIR [--watch 60]` redraws it during a run; `--stop-at` for time-limited sessions; resume refuses a changed recipe.
+- **Reference numbers:** uniform guessing = 9.01 nats; a model that knows only token frequencies = **5.87 nats** on the validation tokens (slightly higher on masked tokens only, because the always-given header is included in that count).
+- **Acceptance (Q8):** (a) validation loss well below 5.87 and still falling; (b) a reloaded checkpoint reproduces its evaluation loss; (c) a resumed run matches an uninterrupted one; (d) loss curves saved. No target number is set before the first real curve.
+- **Status: built and smoke-tested; the real run has NOT been done.** `tests/test_train.py`, 52 checks (including the monitoring: epoch values, live files, TensorBoard scalars, the `plot` command): the tiny model learns a memorisable task (3.69 to 0.003 over 1,500 steps, after a plateau of roughly 100 steps); on CPU, a reloaded checkpoint reproduces its evaluation exactly (b) and resume is bit-for-bit identical to an uninterrupted run, including history and final evaluation (c); on CUDA with bf16 these will be close, not identical; `history.json` and the curves are written (d); resume refuses a changed recipe; `--task sft` still ends in `not_built`. Local smoke runs on this Mac (MPS, fp32, real data): the **tiny** model (0.62M parameters, batch 16) went from 7.53 to 6.26 validation bound in 400 steps at 9.7 steps/s, which is still above the 5.87 baseline, so a run that short says **nothing** about whether the plateau is escaped; the **base** model (35.83M parameters, batch 32) runs at **0.46 steps/s**, so 40,000 steps would take about 24 hours on this Mac: the real run needs a GPU. Acceptance (a) is open until that run. Not tested: the bf16 path (no CUDA here) and Colab.
+- **Known risk:** the loss may sit on the ~5.87 token-frequency plateau for thousands of steps (seen in the old notebooks with a different model); watch the first evaluations. One evaluation on 256 blocks is accurate to a few hundredths of a nat because the `1/p` weight is heavy-tailed at small `t` (the mean over evaluation seeds is unbiased, tested); compare steps within a run and use the full-validation number at the end.
 
 ### Phase 6: Sampling and inference (notebook level)
 
@@ -163,8 +160,8 @@ DLM/
   run.py              python run.py phase0 | phase1 | pretrain | sft | generate | test
   run_colab.ipynb     thin Colab runner (mount Drive, clone, pip install, call run.py)
   dlm/                download.py, cleaning.py, tokenizer.py   (built, Phases 0-1)
-                      data.py, model.py, diffusion.py, train.py, sample.py   (data.py built, Phase 2; model, diffusion, train, sample are interface skeletons: Phases 3-6 and 8)
-  tests/              offline tests (1,687 checks); `python run.py test`
+                      data.py, model.py, diffusion.py, train.py, sample.py   (built: Phases 0-5 incl. model/diffusion/train; sample.py is an interface skeleton, Phase 6; train.py --task sft is Phase 8)
+  tests/              offline tests (1,789 checks); `python run.py test`
 ```
 
 The five skeleton modules each state what they own, consume and produce, and the open decisions to grill before building them; until then `python run.py pretrain|sft|generate|phase2` exits 2 and names the phase. Fine-tuning is `train.py` with `--init-from <pre-trained checkpoint> --task sft`: same loop, prompt never masked, loss on the response only.

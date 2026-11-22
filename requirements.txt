@@ -9,3 +9,4 @@ transformers>=5.23
 # and never add numpy (reinstalling it breaks Colab's live kernel).
 torch
 matplotlib
+tensorboard  # optional: Colab ships it; without it only training_curves.png / history.json are written

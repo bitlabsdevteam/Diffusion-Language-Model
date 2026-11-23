@@ -11,6 +11,19 @@ sys.path.insert(0, str(ROOT))
 from dlm import colab  # noqa: E402
 
 
+_MISSING = object()
+# On a real Colab the real `google` / `google.colab` are installed: remember them so the tests can put them back.
+_ORIGINAL = {k: sys.modules.get(k, _MISSING) for k in ("google", "google.colab")}
+
+
+def restore_modules():
+    for name, mod in _ORIGINAL.items():
+        if mod is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = mod
+
+
 def fake_colab(events, flush_fails=False):
     """Install a fake google.colab; every drive/runtime call is appended to `events`."""
     google, mod = types.ModuleType("google"), types.ModuleType("google.colab")
@@ -29,11 +42,22 @@ def fake_colab(events, flush_fails=False):
 
 
 def remove_colab():
-    sys.modules.pop("google.colab", None)
-    sys.modules.pop("google", None)
+    """Make `from google.colab import ...` raise ImportError, even where the real google.colab is installed.
+
+    Popping the entries is not enough: on Colab the import would then find the REAL module, and `unassign()` would
+    be called for real (it fails outside a notebook kernel, and inside one it would end the user's session)."""
+    restore_modules()
+    sys.modules["google.colab"] = None  # None in sys.modules = "import blocked"
 
 
 def main():
+    try:
+        _main()
+    finally:
+        restore_modules()  # never leave a fake (or a block) behind for later code in this process
+
+
+def _main():
     checks = 0
 
     def ok(cond, msg):

@@ -2,7 +2,8 @@
 
 `finish_session` is the last cell of run_colab.ipynb. It only ends the session when it is SAFE to do so:
   1. the trained model <OUT>/checkpoints/<run>/final/model.pt exists on Drive (and, by default, the evaluation report
-     <run>/eval/report.json too, because that report is the point of the run);
+     <run>/eval/report.json too, because that report is the point of the run). `require_model=False` skips the model
+     check for a notebook that only TESTS a model published on the Hugging Face Hub: it has nothing to save;
   2. GIFs produced under /content (not on Drive) are copied to <run>/eval/ first;
   3. a countdown gives you `grace_seconds` to cancel (stop the cell);
   4. Drive is flushed and unmounted so every write reaches it, and only then the runtime is released with
@@ -19,7 +20,7 @@ from pathlib import Path
 
 
 def finish_session(out_root, run: str = "pretrain_base", grace_seconds: int = 60, require_eval: bool = True,
-                   enabled: bool = True, copy_globs: tuple[str, ...] = ("/content/unmask*.gif",),
+                   require_model: bool = True, enabled: bool = True, copy_globs: tuple[str, ...] = ("/content/unmask*.gif",),
                    sleep=time.sleep, log=print) -> dict:
     """Return {"ended": bool, "reason": str, "copied": [paths]}; "ended" means unassign() was called."""
     def refuse(reason):
@@ -31,7 +32,7 @@ def finish_session(out_root, run: str = "pretrain_base", grace_seconds: int = 60
         return refuse("QUIT_WHEN_DONE is False (the session stays connected)")
     run_dir = Path(out_root) / "checkpoints" / run
     model = run_dir / "final" / "model.pt"
-    if not model.is_file():
+    if require_model and not model.is_file():
         return refuse(f"{model} does not exist, so training has not finished (or did not save). "
                       "Nothing is lost by staying connected; fix the problem, or disconnect yourself")
     if require_eval and not (run_dir / "eval" / "report.json").is_file():
@@ -43,13 +44,14 @@ def finish_session(out_root, run: str = "pretrain_base", grace_seconds: int = 60
         return refuse("not running on Colab (google.colab is unavailable)")
 
     dest = run_dir / "eval"
-    dest.mkdir(parents=True, exist_ok=True)
     for pattern in copy_globs:
         for f in sorted(glob.glob(pattern)):
+            dest.mkdir(parents=True, exist_ok=True)
             target = dest / Path(f).name
             shutil.copy2(f, target)
             copied.append(str(target))
-    log(f"Saved on Drive: {model}" + (f"; copied {len(copied)} file(s) to {dest}" if copied else ""))
+    saved = f"Saved on Drive: {model}" if model.is_file() else "Nothing to save (the model is on the Hub)"
+    log(saved + (f"; copied {len(copied)} file(s) to {dest}" if copied else ""))
     for s in range(int(grace_seconds), 0, -1):
         log(f"Ending the session in {s} s (stop this cell to cancel) ...")
         sleep(1)

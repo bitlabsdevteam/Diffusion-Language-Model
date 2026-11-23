@@ -148,6 +148,21 @@ def _main():
         r = colab.finish_session(empty_out, require_model=False, grace_seconds=0, run="no_such_run", **kw)
         ok(not r["ended"] and "report.json" in r["reason"], "require_model=False still honours require_eval")
 
+        # out_root=None: a notebook that never mounts Drive (it only tests a model from the Hub)
+        events.clear(); sleeps.clear(); logs.clear()
+        fake_colab(events)
+        r = colab.finish_session(None, grace_seconds=2, **kw)
+        ok(r["ended"] and events == ["unassign"], "out_root=None ends the session without touching Drive (no flush, no unmount)")
+        ok(r["copied"] == [] and sleeps == [1, 1] and any("Nothing to save" in m for m in logs), "out_root=None: nothing copied, the countdown still runs, it says there is nothing to save")
+        events.clear()
+        r = colab.finish_session(None, enabled=False, **kw)
+        ok(not r["ended"] and events == [] and "QUIT_WHEN_DONE" in r["reason"], "out_root=None with enabled=False keeps the session")
+        events.clear()
+        fake_colab(events, flush_fails=True)
+        r = colab.finish_session(None, grace_seconds=0, **kw)
+        ok(r["ended"] and events == ["unassign"], "out_root=None never flushes Drive, so a broken Drive cannot stop it")
+        fake_colab(events)
+
         # not on Colab
         remove_colab()
         events.clear()
@@ -201,16 +216,14 @@ def _main():
         compile(re.sub(r"^(\s*)[!%].*$", r"\1pass", s_, flags=re.M), f"cell{i}", "exec")
     ok(True, "test notebook: every code cell compiles")
     ok("finish_session" in s2[-1] and "try:" in s2[-1] and "except" in s2[-1], "test notebook: the LAST cell ends the session, guarded")
-    ok("require_model=False" in s2[-1] and "require_eval=False" in s2[-1], "test notebook: ending the session needs no model on Drive (it is on the Hub)")
+    ok("finish_session(None" in s2[-1], "test notebook: ending the session does not use Drive")
+    ok(not re.search(r"drive\.mount|import drive|/content/drive|MyDrive|flush_and_unmount", all2), "test notebook: Google Drive is not used anywhere")
     ok('HF_REPO_ID = ""' in s2[0] and "QUIT_WHEN_DONE = True" in s2[0] and 'SCHEDULE = "cosine"' in s2[0], "test notebook: repo left blank, quits when done, cosine by default")
     ok(not any(re.search(r"hf_[A-Za-z0-9]{20,}", s_) for s_ in s2) and "token=" not in "".join(s2), "test notebook: no token inside")
     ok(not any("run.py pretrain" in s_ for s_ in s2), "test notebook: never trains")
     ok(not any(w in "".join(s2) for w in ("publish(", "upload_folder", "create_repo", "PUSH_TO_HUB")), "test notebook: never uploads or changes anything on the Hub")
     ok("bitlabsdb" not in all2, "test notebook: no personal Hub name committed")
-    gens = [s_ for s_ in s2 if 'sh("generate"' in s_ or "--ckpt" in s_]
-    ok(gens and all("LOCAL" not in s_ or "COMPARE_WITH_DRIVE" in s_ for s_ in gens if "run.py eval" in s_ or 'sh("generate"' in s_), "test notebook: generation and eval use the Hub download, not the Drive copy")
     ok(all('"--ckpt", CKPT' in s_ for s_ in s2 if 'sh("generate"' in s_) and not any("--hf" in s_ and "sh(" in s_ for s_ in s2), "test notebook: every generate call reads CKPT (the downloaded Hub folder)")
-    ok(any("--out /content/hf_eval" in s_ for s_ in s2), "test notebook: eval writes outside the Hub download folder")
 
     # cells 4 and 6 for real, on a synthetic model: "uploaded" to a fake Hub (prepare_folder builds the exact Hub layout)
     sys.path.insert(0, str(ROOT / "tests"))
@@ -255,7 +268,7 @@ def _main():
             (run / "eval" / "samples.md").write_text("# samples\n")
             with contextlib.redirect_stdout(io.StringIO()):
                 hub_dir = hub.prepare_folder(run, root / "hub_download", "someone/tiny-model")["out"]
-            ns = {"HF_REPO_ID": "someone/tiny-model", "SCHEDULE": "cosine", "COMPARE_WITH_DRIVE": True, "RUN": str(run), "LOCAL": str(final)}
+            ns = {"HF_REPO_ID": "someone/tiny-model", "SCHEDULE": "cosine"}
             real_download = hub.download_snapshot
             asked = []
             hub.download_snapshot = lambda repo: asked.append(repo) or hub_dir  # the fake Hub: no network, no token
@@ -286,26 +299,18 @@ def _main():
                 with contextlib.redirect_stdout(buf):
                     exec(cell6, ns)
                 out6 = buf.getvalue()
-                ok("largest difference = 0" in out6 and out6.count("IDENTICAL") == 2 and "RESULT: the Hub model is identical" in out6, "test notebook cell 6: Hub weights and greedy text equal the Drive model")
-                # a Hub copy with different weights must be caught
-                other = DiffusionTransformerLM(DLMConfig.from_preset("tiny", vocab_size=V, seq_len=96)).eval()
-                torch.manual_seed(1)
-                for prm in other.parameters():
-                    torch.nn.init.normal_(prm, std=0.05) if prm.ndim >= 2 else None
-                other.save_pretrained(root / "other")
-                shutil.copytree(root / "tokenizer", root / "other" / "tokenizer")
-                from dlm.model import save_safetensors
-                save_safetensors(other, Path(hub_dir) / "model.safetensors")
+                ok("loaded " in out6 and "RESULT: the Hub model loads, generates and greedy decoding repeats exactly." in out6 and "PROBLEMS" not in out6,
+                   "test notebook cell 6: a sound Hub model passes (finite weights, tied embeddings, vocab, no [MASK], greedy repeats)")
+                # a Hub copy with a NaN weight must be reported, not crash the cell
+                from dlm.model import load_model, save_safetensors
+                broken = load_model(hub_dir)
+                broken.tok_emb.weight.data[0, 0] = float("nan")
+                save_safetensors(broken, Path(hub_dir) / "model.safetensors")
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     exec(cell6, ns)
-                ok("MISMATCH" in buf.getvalue() and "RESULT: the Hub model is identical" not in buf.getvalue(), "test notebook cell 6: a Hub model with different weights is flagged")
-                with contextlib.redirect_stdout(io.StringIO()) as skip_buf:
-                    exec(cell6, {**ns, "COMPARE_WITH_DRIVE": False})
-                ok("Skipped" in skip_buf.getvalue(), "test notebook cell 6: skipped when COMPARE_WITH_DRIVE = False")
-                with contextlib.redirect_stdout(io.StringIO()) as nodrive_buf:
-                    exec(cell6, {**ns, "LOCAL": str(root / "no_final")})
-                ok("Skipped: no trained model" in nodrive_buf.getvalue(), "test notebook cell 6: skipped when Drive has no final/")
+                ok("PROBLEMS" in buf.getvalue() and "non-finite weights" in buf.getvalue() and "RESULT: the Hub model loads" not in buf.getvalue(),
+                   "test notebook cell 6: a Hub model with a NaN weight is flagged")
             finally:
                 hub.download_snapshot = real_download
             try:

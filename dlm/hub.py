@@ -72,6 +72,12 @@ def download_snapshot(repo_id: str) -> str:
 
 
 # ---------------------------------------------------------------- the model card
+def sampling_schedule(run_info: dict | None) -> str:
+    """The sampler's default noise schedule: the one the model was trained with (run_info's recipe), else linear."""
+    schedule = ((run_info or {}).get("recipe") or {}).get("schedule")
+    return schedule if schedule in ("linear", "cosine") else GENERATION_CONFIG["schedule"]
+
+
 def _read_json(path: Path):
     return json.loads(path.read_text()) if path.is_file() else None
 
@@ -179,7 +185,8 @@ def render_card_body(repo_id: str, name: str, model_info: dict, cfg: dict, run_i
         f"model, tok = load_checkpoint(snapshot_download(\"{repo_id}\"), device=\"cpu\")",
         "print(generate_text(model, tok, \"Once upon a time, there was a little\", seed=0)[\"text\"])", "```", "",
         "Defaults are in `generation_config.json`: up to 480 new tokens, decoding blocks of 32 filled left to right, one token "
-        "per step, temperature 0.8, the Story cut at the first `<|end|>` or `[EOS]`.", "",
+        f"per step, temperature 0.8, the `{sampling_schedule(run_info)}` unmasking schedule (the noise schedule the model was trained "
+        "with; `python run.py generate` needs `--schedule` to match), the Story cut at the first `<|end|>` or `[EOS]`.", "",
         "## References", "",
         "- Nie et al., *Large Language Diffusion Models* (LLaDA), 2025. https://arxiv.org/abs/2502.09992",
         "- Eldan and Li, *TinyStories: How Small Can Language Models Be and Still Speak Coherent English?*, 2023. "
@@ -219,13 +226,14 @@ def prepare_folder(run_dir, out_dir, repo_id: str, license: str = "apache-2.0") 
     model.load_state_dict(torch.load(final / "model.pt", map_location="cpu"))
     save_safetensors(model, out / "model.safetensors")
     (out / "config.json").write_text(json.dumps({"model_type": "dlm", "architectures": ["DiffusionTransformerLM"], **cfg}, indent=2) + "\n")
-    (out / "generation_config.json").write_text(json.dumps(GENERATION_CONFIG, indent=2) + "\n")
     for f in sorted((final / "tokenizer").iterdir()):
         if f.is_file() and not f.name.startswith("."):
             shutil.copy2(f, out / f.name)
     run_info = _read_json(final / "run_info.json")
     if run_info:
         shutil.copy2(final / "run_info.json", out / "run_info.json")
+    schedule = sampling_schedule(run_info)
+    (out / "generation_config.json").write_text(json.dumps({**GENERATION_CONFIG, "schedule": schedule}, indent=2) + "\n")
     for src in (final / "training_curves.png", run_dir / "training_curves.png"):
         if src.is_file():
             shutil.copy2(src, out / "training_curves.png")

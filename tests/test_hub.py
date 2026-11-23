@@ -119,6 +119,20 @@ def main():
         ok(all(cfg[k] == v for k, v in model.config.to_dict().items()), "config.json keeps every architecture field")
         gc = json.loads((out / "generation_config.json").read_text())
         ok(gc["max_new_tokens"] == 480 and gc["block_length"] == 32 and gc["temperature"] == 0.8 and "<|end|>" in gc["stop_tokens"], "generation_config.json = the sampler defaults")
+        ok(gc["schedule"] == "linear", "generation_config.json: a linear-trained run gets schedule linear")
+        # the sampler's default schedule follows the schedule the model was trained with
+        run_c = root / "run_cosine"
+        shutil.copytree(run, run_c)
+        (run_c / "final" / "run_info.json").write_text(json.dumps({"recipe": dict(RECIPE, schedule="cosine"), "device": "cuda", "precision": "bf16",
+                                                                   "seconds": 6300.0, "steps_per_second": 3.17}))
+        out_c = Path(hub.prepare_folder(run_c, root / "hub_cosine", "u/cosine-model")["out"])
+        gc_c = json.loads((out_c / "generation_config.json").read_text())
+        ok(gc_c["schedule"] == "cosine" and {k: v for k, v in gc_c.items() if k != "schedule"} == {k: v for k, v in gc.items() if k != "schedule"},
+           "generation_config.json: a cosine-trained run gets schedule cosine and every other default unchanged")
+        ok("`cosine` unmasking schedule" in (out_c / "README.md").read_text() and "`linear` unmasking schedule" in (out / "README.md").read_text(),
+           "the model card names the default unmasking schedule")
+        ok(hub.sampling_schedule(None) == hub.sampling_schedule({}) == hub.sampling_schedule({"recipe": {}}) == hub.sampling_schedule({"recipe": {"schedule": "weird"}}) == "linear",
+           "no run_info, no recipe or an unknown schedule falls back to linear")
 
         # ---- the model card
         from huggingface_hub import ModelCard

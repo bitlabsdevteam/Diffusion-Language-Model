@@ -267,7 +267,15 @@ def _main():
                 out4 = buf.getvalue()
                 ok(asked == ["someone/tiny-model"] and ns["CKPT"] == hub_dir, "test notebook cell 4: downloads HF_REPO_ID and sets CKPT to that folder")
                 ok("All required files are on the Hub" in out4 and "model.safetensors" in out4 and "Trained for 25000 steps" in out4, "test notebook cell 4: lists the files, confirms the upload is complete, shows the steps")
-                ok("WARNING" not in out4 and "NOTE: the repo's generation_config" in out4, "test notebook cell 4: warns that the repo's generation_config.json says linear")
+                ok("WARNING" not in out4 and "NOTE: the repo's generation_config" not in out4, "test notebook cell 4: a Hub repo whose generation_config.json matches SCHEDULE gets no warning")
+                gc_path = Path(hub_dir) / "generation_config.json"
+                good_gc = gc_path.read_text()
+                gc_path.write_text(json.dumps({**json.loads(good_gc), "schedule": "linear"}))  # what an upload made before the fix says
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    exec(cell4, ns)
+                ok("NOTE: the repo's generation_config.json says schedule = 'linear'" in buf.getvalue(), "test notebook cell 4: warns when the repo's generation_config.json says a different schedule")
+                gc_path.write_text(good_gc)
                 os.remove(Path(hub_dir) / "model.safetensors")
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):

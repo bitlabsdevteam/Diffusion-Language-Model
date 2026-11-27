@@ -1,0 +1,3 @@
+# Nothing extra is needed: full fine-tuning and the LoRA ablation (ft_lora.py, built in) use only what ../requirements.txt
+# and Colab already provide (torch, numpy, tokenizers, huggingface_hub, safetensors, matplotlib).
+# Do not add torch/numpy here: Colab ships its own and reinstalling numpy breaks the live kernel.

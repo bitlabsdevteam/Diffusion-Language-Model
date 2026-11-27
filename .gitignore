@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 checkpoints/
 /AWS_credential.md
+/deployment_steps.md

@@ -9,7 +9,8 @@ Two endpoints:
   POST /v1/chat/completions   OpenAI-compatible, modelled on Inception's Mercury API: `stream: true` sends Server-Sent Events
                               with the text as it becomes final; `stream: true, diffusing: true` sends the WHOLE text at every
                               denoising step (masked positions drawn as a block) for the client to overwrite.
-Everything for the streaming endpoint lives in this file: the image build copies only serve.py and entrypoint.py from infra/.
+  GET /demo                   a one-page browser demo of the diffusing stream (the text resolving out of mask blocks).
+Everything for the streaming endpoint and the demo page lives in this file: the image build copies only serve.py and entrypoint.py from infra/.
 """
 import json
 import logging
@@ -24,7 +25,7 @@ from typing import Literal
 
 import torch
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.background import BackgroundTask
 
@@ -421,3 +422,221 @@ def chat_completions(body: ChatRequest, request: Request):
                              media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
                              background=BackgroundTask(slot.release))
+
+
+# ================================================================ /demo: watch the text denoise in a browser
+DEMO_CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; "
+            "img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+DEMO_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyStories DLM demo</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#faf9f7;--card:#fff;--fg:#1c1917;--muted:#6b6560;--line:#e4e0db;--accent:#2457d6;--accent-fg:#fff;--mask:#cfc9c2;--new:#15803d;--newbg:#dcfce7;--prompt:#8a837c;--err:#b91c1c}
+@media (prefers-color-scheme:dark){:root{--bg:#0e0d0c;--card:#181614;--fg:#ece8e3;--muted:#a39c94;--line:#2c2825;--accent:#6b9bff;--accent-fg:#0e0d0c;--mask:#443f3a;--new:#86efac;--newbg:#14532d;--prompt:#8f8880;--err:#f87171}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:760px;margin:0 auto;padding:28px 16px 48px}
+h1{font-size:1.5rem;margin:0 0 4px;letter-spacing:-.01em}
+.sub{margin:0 0 20px;color:var(--muted);font-size:.95rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+label{display:block;font-size:.82rem;font-weight:600;color:var(--muted);margin:0 0 4px}
+textarea,input[type=number],select{width:100%;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+textarea{resize:vertical;min-height:64px}
+textarea:focus-visible,input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:12px}
+.check{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:.92rem}
+.check input{width:18px;height:18px}
+.row{display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap}
+button{font:inherit;font-weight:600;border:1px solid var(--line);border-radius:8px;padding:9px 18px;cursor:pointer;background:var(--card);color:var(--fg)}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button:disabled{opacity:.5;cursor:not-allowed}
+#status{color:var(--muted);font-size:.9rem}
+#status.err{color:var(--err)}
+#out{margin-top:16px;min-height:11rem;font:1.05rem/1.7 Georgia,"Times New Roman",serif;white-space:pre-wrap;overflow-wrap:anywhere}
+#out .prompt{color:var(--prompt)}
+#out .mask{font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--mask);animation:pulse 1.2s ease-in-out infinite}
+#out .new{color:var(--new);background:var(--newbg);border-radius:3px;animation:fade .9s ease-out forwards}
+@keyframes pulse{50%{opacity:.45}}
+@keyframes fade{to{color:inherit;background:transparent}}
+@media (prefers-reduced-motion:reduce){#out .mask,#out .new{animation:none}}
+#stats{margin-top:12px;color:var(--muted);font-size:.85rem;min-height:1.3em}
+.empty{color:var(--muted);font-family:system-ui,sans-serif;font-size:.95rem}
+footer{margin-top:18px;color:var(--muted);font-size:.8rem}
+.sr{position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden}
+</style>
+</head>
+<body>
+<main>
+<h1>TinyStories DLM</h1>
+<p class="sub">A small masked-diffusion language model. It does not write left to right: the whole text starts as blocks and the words are filled in where the model is most confident.</p>
+
+<section class="card" aria-label="Controls">
+  <label for="prompt">Opening words (optional; leave empty for a story from scratch)</label>
+  <textarea id="prompt" maxlength="2000" placeholder="Once upon a time"></textarea>
+  <div class="grid">
+    <div><label for="look">Look</label>
+      <select id="look"><option value="block" title="best quality">Block by block</option><option value="whole" title="all of it denoises at once; a little less coherent">Whole text</option></select></div>
+    <div><label for="len">Length (tokens)</label><input id="len" type="number" min="16" max="480" step="16" value="128"></div>
+    <div><label for="seed">Seed (empty = random)</label><input id="seed" type="number" min="0" placeholder="random"></div>
+    <div><label for="fps" id="fpsl">Speed: 16 frames/s</label><input id="fps" type="range" min="4" max="60" value="16"></div>
+  </div>
+  <label class="check"><input id="final" type="checkbox"> Show the final result only (no animation)</label>
+  <div class="row">
+    <button id="go" class="primary" type="button">Generate</button>
+    <button id="stop" type="button" disabled>Stop</button>
+    <button id="copy" type="button" disabled>Copy text</button>
+    <span id="status" role="status"></span>
+  </div>
+</section>
+
+<section class="card" style="margin-top:16px" aria-label="Result">
+  <div id="out" aria-live="off"><span class="empty">The story will appear here.</span></div>
+  <div id="stats"></div>
+</section>
+<div id="sr" class="sr" aria-live="polite"></div>
+<footer id="foot"></footer>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const MASK = "█";
+let runId = 0, ctl = null, finalText = "";
+
+function diffRange(a, b) {                       // the characters of b that differ from a (common prefix/suffix trimmed)
+  const m = Math.min(a.length, b.length);
+  let i = 0; while (i < m && a[i] === b[i]) i++;
+  let j = 0; while (j < m - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++;
+  return [i, b.length - j];
+}
+
+function span(cls, text) { const s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; return s; }
+
+function paint(prompt, text, prev) {             // text comes from the model: only ever set as textContent
+  const out = $("out"), frag = document.createDocumentFragment();
+  if (prompt) frag.appendChild(span("prompt", prompt));
+  const [a, b] = prev == null ? [0, 0] : diffRange(prev, text);
+  let pos = 0;
+  for (const part of text.split(/(█+)/)) {
+    if (!part) continue;
+    if (part[0] === MASK) frag.appendChild(span("mask", part));
+    else {
+      const lo = Math.max(pos, a), hi = Math.min(pos + part.length, b);
+      if (lo < hi) {
+        frag.appendChild(document.createTextNode(part.slice(0, lo - pos)));
+        frag.appendChild(span("new", part.slice(lo - pos, hi - pos)));
+        frag.appendChild(document.createTextNode(part.slice(hi - pos)));
+      } else frag.appendChild(document.createTextNode(part));
+    }
+    pos += part.length;
+  }
+  out.replaceChildren(frag);
+}
+
+function setStatus(msg, err) { const s = $("status"); s.textContent = msg || ""; s.className = err ? "err" : ""; }
+function busy(on) { $("go").disabled = on; $("stop").disabled = !on; }
+
+function finish(prompt, text, info, started) {
+  finalText = prompt + text;
+  paint(prompt, text, null);
+  $("copy").disabled = !text;
+  $("sr").textContent = finalText;
+  if (info) {
+    const d = info.dlm || {}, u = info.usage || {};
+    $("stats").textContent = `${u.completion_tokens ?? "?"} tokens · ${d.forward_calls ?? "?"} model calls · ` +
+      `${((performance.now() - started) / 1000).toFixed(1)} s on screen · seed ${d.seed} · ` +
+      `${info.choices[0].finish_reason === "stop" ? "the story ended" : "stopped at the length limit"}`;
+  }
+  setStatus("Done.");
+  busy(false);
+}
+
+async function generate() {
+  const my = ++runId;
+  if (ctl) ctl.abort();
+  ctl = new AbortController();
+  const prompt = $("prompt").value, finalOnly = $("final").checked;
+  const seed = $("seed").value === "" ? Math.floor(Math.random() * 1e9) : Number($("seed").value);
+  const body = { messages: [{ role: "user", content: prompt }], max_completion_tokens: Number($("len").value) || 128,
+                 seed, stream: !finalOnly, diffusing: !finalOnly };
+  if ($("look").value === "whole") { body.block_length = 0; body.steps = 32; }
+  const fps = Number($("fps").value), started = performance.now();
+  busy(true); $("copy").disabled = true; $("stats").textContent = ""; $("sr").textContent = "";
+  setStatus("Waiting for the model…");
+  try {
+    const res = await fetch("/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify(body), signal: ctl.signal });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(res.status === 503 ? "The model is busy with another request. Try again in a moment."
+                      : typeof e.detail === "string" ? e.detail : `HTTP ${res.status}`);
+    }
+    if (finalOnly) {                              // one JSON answer, no frames
+      const j = await res.json();
+      return my === runId && finish(prompt, j.choices[0].message.content, j, started);
+    }
+    const queue = []; let info = null, done = false, shown = null, n = 0;
+    const take = (ev) => {                        // one SSE event: lines "data: {...}" or "data: [DONE]"
+      for (const line of ev.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        if (line.slice(6) === "[DONE]") { done = true; continue; }
+        const o = JSON.parse(line.slice(6));
+        if (o.error) throw new Error(o.error.message || "generation failed");
+        const c = o.choices && o.choices[0];
+        if (c && typeof c.delta.content === "string" && c.delta.content !== "") queue.push(c.delta.content);
+        if (c && c.finish_reason) info = o;
+      }
+    };
+    (async () => {                                // reader: fill the queue as fast as the server sends
+      const reader = res.body.getReader(), dec = new TextDecoder(); let buf = "";
+      for (;;) {
+        const { value, done: end } = await reader.read();
+        if (end) break;
+        buf += dec.decode(value, { stream: true });
+        let i; while ((i = buf.indexOf("\n\n")) >= 0) { take(buf.slice(0, i)); buf = buf.slice(i + 2); }
+      }
+      done = true;
+    })().catch((e) => { if (my === runId) { done = true; fail(e); } });
+    const tick = () => {                          // player: one frame per tick; a long backlog is caught up by skipping frames
+      if (my !== runId) return;
+      if (queue.length) {
+        const frames = queue.splice(0, 1 + Math.floor(queue.length / 30));
+        const next = frames[frames.length - 1];
+        paint(prompt, next, shown); shown = next; n++;
+        setStatus(`Denoising… frame ${n}`);
+      } else if (done) {
+        return finish(prompt, shown || "", info, started);   // the last frame shown is the exact final text
+      }
+      setTimeout(tick, 1000 / fps);
+    };
+    tick();
+  } catch (e) { if (my === runId) fail(e); }
+}
+
+function fail(e) {
+  if (e && e.name === "AbortError") return;
+  setStatus(e && e.message ? e.message : String(e), true);
+  busy(false);
+}
+
+$("go").addEventListener("click", generate);
+$("stop").addEventListener("click", () => { runId++; if (ctl) ctl.abort(); setStatus("Stopped."); busy(false); });
+$("fps").addEventListener("input", () => { $("fpsl").textContent = `Speed: ${$("fps").value} frames/s`; });
+$("copy").addEventListener("click", () => { if (navigator.clipboard) navigator.clipboard.writeText(finalText).then(() => setStatus("Copied."), () => {}); });
+$("prompt").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !$("go").disabled) generate(); });
+fetch("/healthz").then((r) => r.json()).then((h) => {
+  $("foot").textContent = `Model ${h.model_version} · ${h.schedule} schedule · ${h.device}${h.gpu ? " (" + h.gpu + ")" : ""} · context ${h.context_length} tokens`;
+}).catch(() => {});
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/demo", response_class=HTMLResponse, include_in_schema=False)
+def demo():
+    return HTMLResponse(DEMO_HTML, headers={"Content-Security-Policy": DEMO_CSP, "Cache-Control": "no-cache"})

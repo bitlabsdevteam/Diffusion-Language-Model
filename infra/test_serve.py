@@ -348,6 +348,29 @@ ok(res["long"][0] == 200 and res["long"][1][-1] == "[DONE]", "the running stream
 ok(recovers(3) is not None, "lock free after the stream ended")
 serve.app.state.model = real
 
+# ---------------------------------------------------------------- 5b. the demo page
+print("5b. /demo")
+c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
+c.request("GET", "/demo")
+r = c.getresponse()
+page = r.read().decode()
+ok(r.status == 200 and r.getheader("content-type").startswith("text/html"), "GET /demo serves HTML")
+csp = r.getheader("content-security-policy") or ""
+ok("default-src 'none'" in csp and "connect-src 'self'" in csp and "frame-ancestors 'none'" in csp, "restrictive CSP header")
+ok("/v1/chat/completions" in page and "diffusing" in page and 'id="go"' in page, "the page calls the streaming endpoint")
+ok("innerHTML" not in page and "eval(" not in page, "model text is never inserted as HTML")
+ok("http://" not in page.replace("http://127", "") and "https://" not in page, "no external resources")
+import re  # noqa: E402
+import subprocess  # noqa: E402
+
+script = re.search(r"<script>\n(.*?)</script>", page, re.S).group(1)
+(tmp / "demo.js").write_text(script)
+if shutil.which("node"):
+    chk = subprocess.run(["node", "--check", str(tmp / "demo.js")], capture_output=True, text=True)
+    ok(chk.returncode == 0, f"the page's JavaScript parses: {chk.stderr[:200]}")
+else:
+    print("  (node not found: JavaScript syntax not checked)")
+
 # ---------------------------------------------------------------- 6. healthz
 c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
 c.request("GET", "/healthz")

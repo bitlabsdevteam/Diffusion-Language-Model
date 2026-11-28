@@ -28,7 +28,7 @@ GitHub code revision     -> Docker image -> inference application
 - **EC2** provides the GPU and runs the API. **EBS** is the attached disk holding Docker images and the downloaded model.
 - The API initially supports **story generation and continuation**, matching pretraining. Instruction following is a later SFT phase.
 - Use the existing PyTorch implementation for this deployment. vLLM v0.34.0 has model-specific diffusion support, but this project's custom `DiffusionTransformerLM` needs an additional integration before it can use vLLM.
-- The service runs one model process and one generation at a time. Concurrent generation requests receive `503` and can retry; this version does not implement dynamic batching or token streaming.
+- The service runs one model process and one generation at a time. Concurrent generation requests receive `503` and can retry; this version does not implement dynamic batching. Token streaming was added after this guide was written: `infra/serve.py` now also serves `POST /v1/chat/completions` (see `infra/README.md`), so the inline `serve.py` below is out of date.
 
 ## 2. Values to choose when provisioning
 

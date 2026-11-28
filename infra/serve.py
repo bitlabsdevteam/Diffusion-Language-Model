@@ -3,20 +3,36 @@
 Loads the checkpoint once at startup, serves one generation at a time (a second concurrent request gets 503)
 and refuses to start when the release and the container disagree (schedule, code revision, tokenizer ids).
 DLM_DEVICE (default cuda) and DLM_DTYPE (fp32 default; fp16 only after a parity check, a T4 has no bf16).
+
+Two endpoints:
+  POST /generate              the original blocking endpoint (unchanged; gpu.sh smoke and deploy.md use it).
+  POST /v1/chat/completions   OpenAI-compatible, modelled on Inception's Mercury API: `stream: true` sends Server-Sent Events
+                              with the text as it becomes final; `stream: true, diffusing: true` sends the WHOLE text at every
+                              denoising step (masked positions drawn as a block) for the client to overwrite.
+Everything for the streaming endpoint lives in this file: the image build copies only serve.py and entrypoint.py from infra/.
 """
 import json
+import logging
 import os
 import threading
 import time
+import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
 import torch
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.background import BackgroundTask
 
-from dlm.sample import generate_text, load_checkpoint
+from dlm.cleaning import clean_story
+from dlm.data import HEADER
+from dlm.sample import COLLAPSE_SHARE, END_NAMES, commit_plan, generate_text, load_checkpoint, plan_blocks, specials
+
+log = logging.getLogger("uvicorn.error")
 
 
 class GenerateRequest(BaseModel):
@@ -95,3 +111,313 @@ def generate(body: GenerateRequest, request: Request):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         state.generation_lock.release()
+
+
+# ================================================================ streaming, OpenAI-compatible (Mercury-style)
+MASK_GLYPH = "█"  # drawn for every still-masked token in `diffusing` frames
+MAX_MESSAGES = 64
+MAX_PROMPT_CHARS = 8192
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    role: str
+    content: str | list[dict] | None = None
+
+
+class ChatRequest(BaseModel):
+    """OpenAI chat-completions body. Unknown fields (top_p, stop, user, stream_options, ...) are ignored, as most gateways
+    send them; `n` above 1 is refused. Fields after `diffusing` are extensions of this server."""
+    model_config = ConfigDict(extra="ignore", allow_inf_nan=False)
+    model: str | None = None  # ignored: the one deployed model answers, and its version is echoed back
+    messages: list[ChatMessage] = Field(min_length=1, max_length=MAX_MESSAGES)
+    max_tokens: int | None = Field(default=None, ge=1, le=480)
+    max_completion_tokens: int | None = Field(default=None, ge=1, le=480)  # wins over max_tokens (Mercury's name)
+    temperature: float | None = Field(default=None, ge=0, le=2)  # default 0.8
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)  # default 0
+    n: int = Field(default=1, ge=1, le=1)
+    stream: bool = False
+    diffusing: bool = False  # with stream: every chunk is the whole text so far, masked tokens drawn as a block
+    # extensions
+    chunk: Literal["block", "prefix"] = "block"  # stream granularity: when a decoding block completes / as soon as the text is final
+    mode: Literal["story", "continue"] | None = None
+    steps: int | None = Field(default=None, ge=1, le=480)
+    block_length: int = Field(default=32, ge=0, le=512)
+
+
+class Slot:
+    """The generation lock, taken once. release() is idempotent so that every cleanup path (end of the stream, generator close,
+    the response's background task, garbage collection) may call it: a client that disconnects before the first byte never
+    starts the stream generator, so a `finally` inside it alone would leak the lock and every later request would get 503."""
+
+    def __init__(self, lock: threading.Lock):
+        self._lock, self._held, self._guard = lock, True, threading.Lock()
+
+    @classmethod
+    def take(cls, lock: threading.Lock):
+        return cls(lock) if lock.acquire(blocking=False) else None
+
+    def release(self) -> None:
+        with self._guard:
+            if not self._held:
+                return
+            self._held = False
+        self._lock.release()
+
+    def __del__(self):
+        self.release()
+
+
+class Decode:
+    """One generation, validated up front (so a bad request is a 422 before any byte is streamed). `events()` runs the same
+    semi-autoregressive loop as dlm.sample.diffusion_generate (same operations, same random draws in the same order, so the
+    same seed gives the same text) but yields after every model call instead of returning at the end."""
+
+    def __init__(self, model, tok, prompt: str, mode, max_new_tokens: int, steps, block_length: int,
+                 temperature: float, schedule: str, seed: int):
+        self.model, self.tok, self.schedule, self.temperature, self.seed = model, tok, schedule, temperature, seed
+        mode = mode or ("continue" if prompt.strip() else "story")
+        if mode == "story" and prompt.strip():
+            raise ValueError("mode 'story' takes no opening words; send an empty user message or use mode 'continue'")
+        if mode == "continue" and not prompt.strip():
+            raise ValueError("mode 'continue' needs the opening words of the Story in the last user message")
+        self.sp = specials(tok)
+        self.end_ids = {self.sp[n] for n in END_NAMES}
+        header_ids = tok.encode(HEADER, add_special_tokens=False).ids
+        self.prompt_ids = tok.encode(clean_story(prompt), add_special_tokens=False).ids if mode == "continue" else []
+        self.prefix = [self.sp["[BOS]"]] + header_ids + self.prompt_ids
+        seq_len = model.config.seq_len
+        if len(self.prefix) >= seq_len:
+            raise ValueError(f"prompt too long: {len(self.prefix)} prefix tokens, the model's window is {seq_len}")
+        self.gen_len = min(max_new_tokens, seq_len - len(self.prefix))
+        self.blocks, self.steps_per_block = plan_blocks(self.gen_len, block_length, steps)
+
+    @torch.no_grad()  # the decorator re-enters no_grad on every resume; a `with` around a yield would not (grad mode is per thread)
+    def events(self):
+        model, sp, P = self.model, self.sp, len(self.prefix)
+        mask_id, pad_id = sp["[MASK]"], sp["[PAD]"]
+        device = next(model.parameters()).device
+        generator = torch.Generator().manual_seed(self.seed) if self.temperature > 0 else None
+        ids = torch.tensor(self.prefix + [mask_id] * self.gen_len, device=device)[None]
+        forward_calls = covered = 0
+        for a, b in self.blocks:
+            lo, hi = P + a, P + b
+            for n_commit in commit_plan(b - a, min(self.steps_per_block, b - a), self.schedule):
+                if n_commit == 0:
+                    continue
+                logits = model(ids)[0, lo:hi].float()
+                forward_calls += 1
+                logits[:, mask_id] = float("-inf")
+                logits[:, pad_id] = float("-inf")
+                probs = torch.softmax(logits, dim=-1)
+                if self.temperature > 0:
+                    x0 = torch.multinomial(torch.softmax(logits / self.temperature, dim=-1).cpu(), 1, generator=generator)
+                    x0 = x0.squeeze(-1).to(device)
+                else:
+                    x0 = logits.argmax(dim=-1)
+                conf = probs.gather(-1, x0[:, None]).squeeze(-1)
+                conf = torch.where(ids[0, lo:hi] == mask_id, conf, torch.full_like(conf, float("-inf")))
+                top = conf.topk(n_commit).indices
+                ids[0, lo + top] = x0[top]
+                yield {"kind": "step", "gen": ids[0, P:P + self.gen_len].tolist(), "hi": b}
+            covered = hi
+            yield {"kind": "block", "gen": ids[0, P:P + self.gen_len].tolist(), "hi": b}
+            if any(t in self.end_ids for t in ids[0, P:hi].tolist()):  # later blocks are never run
+                break
+        gen = ids[0, P:covered].tolist()
+        end_index = next((i for i, t in enumerate(gen) if t in self.end_ids), None)
+        story = gen if end_index is None else gen[:end_index]
+        warnings = []
+        if len(story) >= 20:
+            top_tok, n = Counter(story).most_common(1)[0]
+            if n / len(story) >= COLLAPSE_SHARE:
+                warnings.append(f"collapse: {n / len(story):.0%} of the generated tokens are {self.tok.id_to_token(top_tok)!r}")
+        yield {"kind": "done", "story": story, "truncated": end_index is None, "forward_calls": forward_calls,
+               "warnings": warnings, "prompt_tokens": P}
+
+
+class Renderer:
+    """Token ids -> the text the client sees: the Story WITHOUT the opening words (a chat reply does not echo the prompt;
+    `prompt + content` equals what /generate returns as `text`)."""
+
+    def __init__(self, dec: Decode):
+        self.tok, self.prompt_ids, self.mask_id, self.end_ids = dec.tok, dec.prompt_ids, dec.sp["[MASK]"], dec.end_ids
+        self.base = self.tok.decode(self.prompt_ids, skip_special_tokens=True)
+
+    def cont(self, story_ids: list[int]) -> str:
+        full = self.tok.decode(self.prompt_ids + story_ids, skip_special_tokens=True)
+        return full[len(self.base):] if full.startswith(self.base) else full
+
+    def prefix(self, gen: list[int]):
+        """(committed tokens from the start of the response up to the first masked one, cut at the first end token; whether an end was seen).
+        Committed tokens never change, so this is always a true prefix of the final Story."""
+        j = gen.index(self.mask_id) if self.mask_id in gen else len(gen)
+        pre = gen[:j]
+        for i, t in enumerate(pre):
+            if t in self.end_ids:
+                return pre[:i], True
+        return pre, False
+
+    def frame(self, gen: list[int]) -> str:
+        """The whole text so far with a block for every still-masked token; nothing after the first committed end token."""
+        end = next((i for i, t in enumerate(gen) if t != self.mask_id and t in self.end_ids), None)
+        gen = gen if end is None else gen[:end]
+        out, run = [], []
+        for t in gen:
+            if t == self.mask_id:
+                if run:
+                    out.append(self.tok.decode(run, skip_special_tokens=True))
+                    run = []
+                out.append(MASK_GLYPH)
+            else:
+                run.append(t)
+        if run:
+            out.append(self.tok.decode(run, skip_special_tokens=True))
+        return "".join(out)
+
+
+def _pieces(dec: Decode, events, chunk: str, diffusing: bool):
+    """Yield ("content", text) pieces and finally ("done", info).
+    appendable (default): each piece is new text to append; text is sent only once final (end of a decoding block, or as soon as
+    the committed prefix grows with chunk='prefix'); a trailing U+FFFD (half a UTF-8 character) is held back until the next piece.
+    diffusing: each piece is the WHOLE text so far, masked tokens as blocks; the last piece is exactly the final text."""
+    rd, last, emitted, seen = Renderer(dec), None, "", 0
+    for ev in events:
+        if ev["kind"] == "done":
+            final = rd.cont(ev["story"])
+            if diffusing:
+                if final != last:
+                    yield "content", final
+            elif final.startswith(emitted):
+                if len(final) > len(emitted):
+                    yield "content", final[len(emitted):]
+            else:  # not expected (tests assert it never happens); what was sent cannot be taken back
+                log.warning("streamed text is not a prefix of the final text; the remainder was not sent")
+            yield "done", ev
+            return
+        if diffusing:
+            frame = rd.frame(ev["gen"][:ev["hi"]])
+            if frame != last:
+                last = frame
+                yield "content", frame
+        elif ev["kind"] == "block" or chunk == "prefix":
+            pre, ended = rd.prefix(ev["gen"])
+            if len(pre) <= seen and not ended:
+                continue
+            seen = len(pre)
+            text = rd.cont(pre)
+            if not ended:
+                text = text.rstrip("�")
+            if text.startswith(emitted) and len(text) > len(emitted):
+                yield "content", text[len(emitted):]
+                emitted = text
+
+
+def content_stream(dec: Decode, chunk: str, diffusing: bool):
+    """_pieces() over a fresh generation; the decoding generator is closed as soon as the stream ends or is closed."""
+    events = dec.events()
+    try:
+        yield from _pieces(dec, events, chunk, diffusing)
+    finally:
+        events.close()
+
+
+def _sse(obj) -> str:
+    return "data: " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n\n"
+
+
+def _finish_reason(info) -> str:
+    return "length" if info["truncated"] else "stop"
+
+
+def _usage(info) -> dict:
+    n = len(info["story"])
+    return {"prompt_tokens": info["prompt_tokens"], "completion_tokens": n, "total_tokens": info["prompt_tokens"] + n}
+
+
+def _last_user_text(body: ChatRequest) -> str:
+    last = body.messages[-1]
+    if last.role != "user":
+        raise ValueError("the last message must have role 'user' (its text is the opening words of the Story; "
+                         "this pre-trained model does not follow instructions, and earlier messages are ignored)")
+    c = last.content
+    if isinstance(c, list):
+        c = "".join(part.get("text", "") for part in c if isinstance(part, dict) and part.get("type", "text") == "text")
+    c = c or ""
+    if len(c) > MAX_PROMPT_CHARS:
+        raise ValueError(f"the last user message is longer than {MAX_PROMPT_CHARS} characters")
+    return c
+
+
+def build_decode(body: ChatRequest, model, tok, schedule: str) -> Decode:
+    """Raises ValueError for anything the client got wrong (the endpoint turns it into a 422)."""
+    if body.diffusing and not body.stream:
+        raise ValueError("diffusing needs stream=true")
+    return Decode(model, tok, _last_user_text(body), body.mode,
+                  max_new_tokens=body.max_completion_tokens or body.max_tokens or 128, steps=body.steps,
+                  block_length=body.block_length, temperature=0.8 if body.temperature is None else body.temperature,
+                  schedule=schedule, seed=body.seed or 0)
+
+
+def _guarded(slot: Slot, pieces, head: dict, started: float, release: dict):
+    """The SSE byte stream. The lock is released when it ends, fails or is closed; Slot.release() is idempotent."""
+    try:
+        base = {"id": head["id"], "object": "chat.completion.chunk", "created": head["created"], "model": head["model"]}
+        yield _sse({**base, "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}]})
+        info = None
+        try:
+            for kind, payload in pieces:
+                if kind == "content":
+                    yield _sse({**base, "choices": [{"index": 0, "delta": {"content": payload}, "finish_reason": None}]})
+                else:
+                    info = payload
+        except Exception:  # headers are already sent: report in-band, then end the stream cleanly
+            log.exception("generation failed while streaming")
+            yield _sse({**base, "error": {"message": "generation failed", "type": "server_error"}})
+            yield "data: [DONE]\n\n"
+            return
+        yield _sse({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": _finish_reason(info)}],
+                    "usage": _usage(info),
+                    "dlm": {**release, "latency_seconds": round(time.perf_counter() - started, 3),
+                            "forward_calls": info["forward_calls"], "warnings": info["warnings"]}})
+        yield "data: [DONE]\n\n"
+    finally:
+        slot.release()
+
+
+@app.post("/v1/chat/completions")
+def chat_completions(body: ChatRequest, request: Request):
+    state = request.app.state
+    schedule = state.release["schedule"]
+    try:
+        dec = build_decode(body, state.model, state.tokenizer, schedule)
+    except ValueError as exc:  # before the lock and before any byte is streamed
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    slot = Slot.take(state.generation_lock)
+    if slot is None:
+        raise HTTPException(status_code=503, detail="Model busy; retry shortly", headers={"Retry-After": "1"})
+    head = {"id": "chatcmpl-" + uuid.uuid4().hex[:24], "created": int(time.time()),
+            "model": state.release["model_version"]}
+    release = {"schedule": schedule, "seed": body.seed or 0}
+    started = time.perf_counter()
+    if not body.stream:
+        try:
+            pieces = list(content_stream(dec, body.chunk, False))
+        except Exception:
+            log.exception("generation failed")
+            raise HTTPException(status_code=500, detail="generation failed") from None
+        finally:
+            slot.release()
+        info = pieces[-1][1]
+        text = "".join(p for k, p in pieces if k == "content")
+        return JSONResponse({**{k: head[k] for k in ("id", "created", "model")}, "object": "chat.completion",
+                             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                                          "finish_reason": _finish_reason(info)}],
+                             "usage": _usage(info),
+                             "dlm": {**release, "latency_seconds": round(time.perf_counter() - started, 3),
+                                     "forward_calls": info["forward_calls"], "warnings": info["warnings"]}})
+    # `slot` is released by the generator's finally, by the background task, and (last resort) by garbage collection.
+    return StreamingResponse(_guarded(slot, content_stream(dec, body.chunk, body.diffusing), head, started, release),
+                             media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+                             background=BackgroundTask(slot.release))
